@@ -198,4 +198,6 @@ export interface AIInvestmentReport {
   shortTermStrategy: string;
   mediumLongTermStrategy: string;
   riskFactors: string[];
+  generatedBy?: string;
+  isRealtimeGenerated?: boolean;
 }

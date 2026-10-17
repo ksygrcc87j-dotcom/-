@@ -124,7 +124,7 @@ ${report.riskFactors.map((r, i) => `${i + 1}. ${r}`).join('\n')}
                 AI 簡明投資建議分析報告
               </h2>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 font-bold border border-purple-500/30">
-                Gemini 3.8 Flash
+                {report?.generatedBy || '三竹AI投研核心 (Gemini 3.8 Flash)'}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">

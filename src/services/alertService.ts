@@ -8,7 +8,7 @@ export function loadAlertRules(): AlertRule[] {
     const raw = localStorage.getItem(ALERTS_STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {
-    console.error('Failed to load alert rules', e);
+    console.warn('Failed to load alert rules', e);
   }
   // Default sample alerts
   return [
@@ -49,7 +49,7 @@ export function saveAlertRules(rules: AlertRule[]) {
   try {
     localStorage.setItem(ALERTS_STORAGE_KEY, JSON.stringify(rules));
   } catch (e) {
-    console.error('Failed to save alert rules', e);
+    console.warn('Failed to save alert rules', e);
   }
 }
 
@@ -58,7 +58,7 @@ export function loadAlertHistory(): TriggeredAlert[] {
     const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {
-    console.error('Failed to load alert history', e);
+    console.warn('Failed to load alert history', e);
   }
   return [
     {
@@ -86,7 +86,7 @@ export function saveAlertHistory(history: TriggeredAlert[]) {
   try {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 50)));
   } catch (e) {
-    console.error('Failed to save alert history', e);
+    console.warn('Failed to save alert history', e);
   }
 }
 
