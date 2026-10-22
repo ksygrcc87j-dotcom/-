@@ -12,7 +12,7 @@ import {
   Activity 
 } from 'lucide-react';
 import { StockData } from '../types/stock';
-import { PRELOADED_STOCKS, getOrGenerateStockData } from '../data/mockStocks';
+import { PRELOADED_STOCKS, getOrGenerateStockData, applyLiveQuoteToStockData } from '../data/mockStocks';
 
 interface MultiStockComparisonProps {
   watchlistSymbols: string[];
@@ -35,18 +35,7 @@ export const MultiStockComparison: React.FC<MultiStockComparisonProps> = ({
     const base = PRELOADED_STOCKS[sym] || getOrGenerateStockData(sym);
     const live = liveQuotes?.[sym];
     if (live) {
-      return {
-        ...base,
-        name: live.name || base.name,
-        price: live.price,
-        yesterdayClose: live.yesterdayClose,
-        change: live.change,
-        changePercent: live.changePercent,
-        openPrice: live.openPrice,
-        highPrice: live.highPrice,
-        lowPrice: live.lowPrice,
-        volume: live.volume,
-      };
+      return applyLiveQuoteToStockData(base, live);
     }
     return base;
   });

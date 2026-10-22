@@ -1279,6 +1279,90 @@ export const STOCK_DICTIONARY: Record<string, { symbol: string; name: string; in
   '6446': { symbol: '6446', name: '藥華藥', industry: '生技醫療業' },
 };
 
+// Helper to overlay live TWSE/TPEx official closing quote onto a StockData object
+export function applyLiveQuoteToStockData(base: StockData, live: any): StockData {
+  if (!live) return base;
+  const price = Number(live.price) > 0 ? Number(live.price) : base.price;
+  const yesterdayClose = Number(live.yesterdayClose) > 0 ? Number(live.yesterdayClose) : base.yesterdayClose;
+  const change = live.change !== undefined ? Number(live.change) : Number((price - yesterdayClose).toFixed(2));
+  const changePercent =
+    live.changePercent !== undefined
+      ? Number(live.changePercent)
+      : yesterdayClose > 0
+      ? Number(((change / yesterdayClose) * 100).toFixed(2))
+      : base.changePercent;
+  const openPrice = Number(live.openPrice) > 0 ? Number(live.openPrice) : price;
+  const highPrice = Number(live.highPrice) > 0 ? Number(live.highPrice) : Math.max(price, openPrice);
+  const lowPrice = Number(live.lowPrice) > 0 ? Number(live.lowPrice) : Math.min(price, openPrice);
+  const volume = Number(live.volume) > 0 ? Number(live.volume) : base.volume;
+  const totalAmount = Number(((volume * price) / 10000).toFixed(2));
+
+  const tick = price < 10 ? 0.01 : price < 50 ? 0.05 : price < 100 ? 0.1 : price < 500 ? 0.5 : price < 1000 ? 1 : 5;
+  const decimals = tick < 0.1 ? 2 : tick < 1 ? 1 : 0;
+
+  const pe = base.eps > 0 ? Number((price / base.eps).toFixed(2)) : base.pe;
+  const pb = base.bookValue > 0 ? Number((price / base.bookValue).toFixed(2)) : base.pb;
+  const majorCost = Number((yesterdayClose * 0.988).toFixed(decimals));
+  const supportLevel = Number((lowPrice * 0.98).toFixed(decimals));
+  const resistanceLevel = Number((highPrice * 1.035).toFixed(decimals));
+  const ma5 = Number(((price * 2 + yesterdayClose * 3) / 5).toFixed(decimals));
+  const ma20 = Number((price * 0.982).toFixed(decimals));
+
+  const bids =
+    Array.isArray(live.bids) && live.bids.length > 0
+      ? live.bids
+      : Array.from({ length: 5 }, (_, idx) => ({
+          price: Number(Math.max(tick, price - tick * idx).toFixed(decimals)),
+          volume: base.orderBook?.bids?.[idx]?.volume || Math.max(25, Math.round((volume * 0.012) / (idx + 1))),
+        }));
+
+  const asks =
+    Array.isArray(live.asks) && live.asks.length > 0
+      ? live.asks
+      : Array.from({ length: 5 }, (_, idx) => ({
+          price: Number((price + tick * (idx + 1)).toFixed(decimals)),
+          volume: base.orderBook?.asks?.[idx]?.volume || Math.max(25, Math.round((volume * 0.012) / (idx + 1))),
+        }));
+
+  return {
+    ...base,
+    name: live.name || base.name,
+    market: live.market || base.market,
+    price,
+    yesterdayClose,
+    change,
+    changePercent,
+    openPrice,
+    highPrice,
+    lowPrice,
+    volume,
+    totalAmount,
+    pe,
+    pb,
+    majorCost,
+    supportLevel,
+    resistanceLevel,
+    ma5,
+    ma20,
+    stageAssessment: `今日收盤價 ${price.toLocaleString()} 元（${change >= 0 ? '+' : ''}${change} / ${changePercent >= 0 ? '+' : ''}${changePercent}%），位於本益比 ${pe} 倍區間。主力成本線 ${majorCost.toLocaleString()} 元具備技術支撐，結構性動能穩健。`,
+    intradayTicks: generateIntradayTicks(price, openPrice, highPrice, lowPrice),
+    orderBook: {
+      ...base.orderBook,
+      bids,
+      asks,
+    },
+    lastUpdated: live.lastUpdated || '13:30:00',
+  };
+}
+
+// Synchronize all PRELOADED_STOCKS with official TAIWAN_STOCK_MASTER closing prices on initialization
+for (const sym of Object.keys(PRELOADED_STOCKS)) {
+  const masterItem = TAIWAN_STOCK_MASTER.find((m) => m.symbol === sym);
+  if (masterItem) {
+    PRELOADED_STOCKS[sym] = applyLiveQuoteToStockData(PRELOADED_STOCKS[sym], masterItem);
+  }
+}
+
 // Smart stock retriever or generator for ANY input ticker/name
 export function getOrGenerateStockData(query: string): StockData {
   const clean = query.trim().toUpperCase();

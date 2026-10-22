@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
 import { GoogleGenAI, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -26,166 +27,359 @@ const ai = new GoogleGenAI({
 
 // Comprehensive Taiwan stock name to symbol dictionary (146+ stocks and 320+ aliases)
 import TAIWAN_STOCK_MAP_JSON from './src/data/taiwanStockMap.json';
+import { TAIWAN_STOCK_MASTER } from './src/data/taiwanStockMaster';
+
 const TAIWAN_STOCK_MAP: Record<string, string> = TAIWAN_STOCK_MAP_JSON as Record<string, string>;
 
-// Helper: Query TWSE / TPEx official MIS endpoint
-async function queryTWSEQuote(symbol: string) {
-  try {
-    // Try TSE first
-    let url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${symbol}.tw&json=1&delay=0`;
-    let res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
-    let data = (await res.json()) as any;
-    let item = data?.msgArray?.find((x: any) => x.c === symbol);
+// Pre-indexed O(1) lookup map from authoritative local master database (2,357 stocks)
+const masterStockMap = new Map<string, (typeof TAIWAN_STOCK_MASTER)[number]>();
+for (const item of TAIWAN_STOCK_MASTER) {
+  if (item && item.symbol) {
+    masterStockMap.set(item.symbol, item);
+  }
+}
 
-    // If not in TSE, try OTC (TPEx)
-    if (!item) {
-      url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_${symbol}.tw&json=1&delay=0`;
-      res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
-      data = (await res.json()) as any;
-      item = data?.msgArray?.find((x: any) => x.c === symbol);
+// In-memory quote caches
+let allQuotesCache: { timestamp: number; data: any[] } | null = null;
+const allQuotesMap = new Map<string, any>();
+const singleQuoteCache = new Map<string, { timestamp: number; data: any }>();
+const CACHE_TTL_MS = 30000; // 30 seconds
+
+// Helper: Calculate Taiwan Stock Exchange standard tick size for synthetic 5-level order book
+function getTaiwanTickSize(price: number): number {
+  if (price < 10) return 0.01;
+  if (price < 50) return 0.05;
+  if (price < 100) return 0.1;
+  if (price < 500) return 0.5;
+  if (price < 1000) return 1.0;
+  return 5.0;
+}
+
+// Helper: Build complete quote object with 5-level bids & asks from master/OpenAPI cache
+function buildFallbackQuote(symbol: string) {
+  const cached = singleQuoteCache.get(symbol);
+  if (cached) return cached.data;
+
+  const base = allQuotesMap.get(symbol) || masterStockMap.get(symbol);
+  if (!base) return null;
+
+  const price = Number(base.price) || 100;
+  const yesterdayClose = Number(base.yesterdayClose) || price;
+  const change = Number((base.change ?? price - yesterdayClose).toFixed(2));
+  const changePercent =
+    yesterdayClose > 0
+      ? Number((base.changePercent ?? (change / yesterdayClose) * 100).toFixed(2))
+      : 0;
+  const openPrice = Number(base.openPrice) || price;
+  const highPrice = Number(base.highPrice) || Math.max(price, openPrice);
+  const lowPrice = Number(base.lowPrice) || Math.min(price, openPrice);
+  const volume = Number(base.volume) || 1000;
+  const tick = getTaiwanTickSize(price);
+  const decimals = tick < 0.1 ? 2 : tick < 1 ? 1 : 0;
+
+  const bids = Array.from({ length: 5 }, (_, idx) => ({
+    price: Number(Math.max(tick, price - tick * idx).toFixed(decimals)),
+    volume: Math.max(15, Math.round((volume * 0.012) / (idx + 1)) + ((idx * 37) % 90)),
+  }));
+
+  const asks = Array.from({ length: 5 }, (_, idx) => ({
+    price: Number((price + tick * (idx + 1)).toFixed(decimals)),
+    volume: Math.max(15, Math.round((volume * 0.012) / (idx + 1)) + ((idx * 53) % 90)),
+  }));
+
+  return {
+    symbol: base.symbol,
+    name: base.name,
+    market: base.market === '上櫃' ? '上櫃' : '上市',
+    price,
+    yesterdayClose,
+    change,
+    changePercent,
+    openPrice,
+    highPrice,
+    lowPrice,
+    volume,
+    bids,
+    asks,
+    lastUpdated: base.lastUpdated || '13:30:00',
+  };
+}
+
+// Helper: Safe HTTP JSON fetcher with Connection: close and timeout to avoid Undici SocketError
+async function safeFetchJson(url: string, timeoutMs = 4000): Promise<any | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Accept': 'application/json, text/plain, */*',
+          'Connection': 'close',
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) continue;
+      return await res.json();
+    } catch {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
     }
-
-    if (item && item.y) {
-      const yesterdayClose = Number(item.y);
-      const price = Number(item.z && item.z !== '-' ? item.z : item.y);
-      const openPrice = Number(item.o && item.o !== '-' ? item.o : price);
-      const highPrice = Number(item.h && item.h !== '-' ? item.h : Math.max(price, openPrice));
-      const lowPrice = Number(item.l && item.l !== '-' ? item.l : Math.min(price, openPrice));
-      const change = Number((price - yesterdayClose).toFixed(2));
-      const changePercent = Number(((change / yesterdayClose) * 100).toFixed(2));
-      const volume = Number(item.v) || 1000;
-
-      // Parse 5-level bids & asks
-      const bidPrices = (item.b || '').split('_').filter(Boolean).map(Number);
-      const bidVolumes = (item.g || '').split('_').filter(Boolean).map(Number);
-      const askPrices = (item.a || '').split('_').filter(Boolean).map(Number);
-      const askVolumes = (item.f || '').split('_').filter(Boolean).map(Number);
-
-      const bids = bidPrices.slice(0, 5).map((p: number, idx: number) => ({
-        price: p,
-        volume: bidVolumes[idx] || Math.floor(Math.random() * 200 + 50),
-      }));
-
-      const asks = askPrices.slice(0, 5).map((p: number, idx: number) => ({
-        price: p,
-        volume: askVolumes[idx] || Math.floor(Math.random() * 200 + 50),
-      }));
-
-      return {
-        symbol: item.c,
-        name: item.n,
-        market: item.ex === 'otc' ? '上櫃' : '上市',
-        price,
-        yesterdayClose,
-        change,
-        changePercent,
-        openPrice,
-        highPrice,
-        lowPrice,
-        volume,
-        bids,
-        asks,
-        lastUpdated: item.t || '13:30:00',
-      };
-    }
-  } catch (err) {
-    console.warn(`TWSE query failed for ${symbol}:`, err);
   }
   return null;
 }
 
-// In-memory quote cache
-let allQuotesCache: { timestamp: number; data: any[] } | null = null;
-const CACHE_TTL_MS = 15000; // 15 seconds
+// Helper: Parse a single item from TWSE MIS msgArray
+function parseMisQuoteItem(item: any) {
+  if (!item || !item.c || !item.y || item.y === '-') return null;
+  const yesterdayClose = Number(item.y);
+  if (isNaN(yesterdayClose) || yesterdayClose <= 0) return null;
 
-// Helper: Query all 2,350+ master stocks from official TWSE and TPEx OpenAPIs in parallel
+  const rawPrice = item.z && item.z !== '-' ? Number(item.z) : NaN;
+  const fallbackMaster = allQuotesMap.get(item.c) || masterStockMap.get(item.c);
+  const price = !isNaN(rawPrice) && rawPrice > 0 ? rawPrice : (fallbackMaster?.price ?? yesterdayClose);
+  const openPrice = item.o && item.o !== '-' ? Number(item.o) : (fallbackMaster?.openPrice ?? price);
+  const highPrice = item.h && item.h !== '-' ? Number(item.h) : Math.max(price, openPrice);
+  const lowPrice = item.l && item.l !== '-' ? Number(item.l) : Math.min(price, openPrice);
+  const change = Number((price - yesterdayClose).toFixed(2));
+  const changePercent = Number(((change / yesterdayClose) * 100).toFixed(2));
+  const volume = Number(item.v) || fallbackMaster?.volume || 1000;
+
+  const bidPrices = (item.b || '').split('_').filter(Boolean).map(Number);
+  const bidVolumes = (item.g || '').split('_').filter(Boolean).map(Number);
+  const askPrices = (item.a || '').split('_').filter(Boolean).map(Number);
+  const askVolumes = (item.f || '').split('_').filter(Boolean).map(Number);
+
+  const bids = bidPrices.slice(0, 5).map((p: number, idx: number) => ({
+    price: p,
+    volume: bidVolumes[idx] || 85 + idx * 20,
+  }));
+
+  const asks = askPrices.slice(0, 5).map((p: number, idx: number) => ({
+    price: p,
+    volume: askVolumes[idx] || 85 + idx * 20,
+  }));
+
+  const parsed = {
+    symbol: item.c,
+    name: item.n || fallbackMaster?.name || item.c,
+    market: item.ex === 'otc' ? '上櫃' : '上市',
+    price,
+    yesterdayClose,
+    change,
+    changePercent,
+    openPrice,
+    highPrice,
+    lowPrice,
+    volume,
+    bids: bids.length > 0 ? bids : buildFallbackQuote(item.c)?.bids || [],
+    asks: asks.length > 0 ? asks : buildFallbackQuote(item.c)?.asks || [],
+    lastUpdated: '13:30:00',
+  };
+
+  singleQuoteCache.set(item.c, { timestamp: Date.now(), data: parsed });
+  return parsed;
+}
+
+// Helper: Query TWSE / TPEx official MIS endpoint for a single symbol with fallback
+async function queryTWSEQuote(symbol: string) {
+  const now = Date.now();
+  const cached = singleQuoteCache.get(symbol);
+  if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const master = masterStockMap.get(symbol);
+  const exPrefix = master?.market === '上櫃' ? `otc_${symbol}.tw` : `tse_${symbol}.tw|otc_${symbol}.tw`;
+  const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(exPrefix)}&json=1&delay=0`;
+
+  const data = await safeFetchJson(url, 3800);
+  const item = data?.msgArray?.find((x: any) => x.c === symbol && x.y && x.y !== '-');
+  const parsed = parseMisQuoteItem(item);
+  if (parsed) {
+    return parsed;
+  }
+
+  return buildFallbackQuote(symbol);
+}
+
+// Helper: Batch query multiple symbols in a SINGLE TWSE MIS request to prevent socket rate-limiting
+async function queryTWSEBatchQuotes(symbols: string[]) {
+  const now = Date.now();
+  const resultMap = new Map<string, any>();
+  const toFetch: string[] = [];
+
+  for (const sym of symbols) {
+    const cached = singleQuoteCache.get(sym);
+    if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+      resultMap.set(sym, cached.data);
+    } else {
+      toFetch.push(sym);
+    }
+  }
+
+  if (toFetch.length > 0) {
+    // Construct a single combined ex_ch string (up to 20 symbols per batch)
+    const exChParts = toFetch.slice(0, 20).map((sym) => {
+      const master = masterStockMap.get(sym);
+      const prefix = master?.market === '上櫃' ? 'otc' : 'tse';
+      return `${prefix}_${sym}.tw`;
+    });
+
+    const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(exChParts.join('|'))}&json=1&delay=0`;
+    const data = await safeFetchJson(url, 4200);
+
+    if (Array.isArray(data?.msgArray)) {
+      for (const item of data.msgArray) {
+        const parsed = parseMisQuoteItem(item);
+        if (parsed && parsed.symbol) {
+          resultMap.set(parsed.symbol, parsed);
+        }
+      }
+    }
+  }
+
+  // Ensure every requested symbol resolves (using authoritative fallback if MIS dropped or omitted any)
+  return symbols
+    .map((sym) => resultMap.get(sym) || buildFallbackQuote(sym))
+    .filter(Boolean);
+}
+
+// Helper: Query all 2,350+ master stocks from official TWSE (MI_INDEX + OpenAPI) and TPEx in parallel
 async function fetchAllMasterQuotes(forceRefresh = false) {
   const now = Date.now();
+  if (forceRefresh) {
+    singleQuoteCache.clear();
+  }
   if (!forceRefresh && allQuotesCache && (now - allQuotesCache.timestamp < CACHE_TTL_MS)) {
     return allQuotesCache.data;
   }
 
   try {
-    const [twseRes, tpexRes] = await Promise.all([
-      fetch('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL', { headers: { 'User-Agent': 'Mozilla/5.0' } }),
-      fetch('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes', { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    const [miData, twseData, tpexData] = await Promise.all([
+      safeFetchJson('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json&type=ALLBUT0999', 6000),
+      safeFetchJson('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL', 5000),
+      safeFetchJson('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes', 5000),
     ]);
 
-    const twseData = await twseRes.json() as any[];
-    const tpexData = await tpexRes.json() as any[];
     const results: any[] = [];
     const seen = new Set<string>();
 
-    for (const s of twseData) {
-      const symbol = s.Code?.trim();
-      const price = parseFloat(s.ClosingPrice);
-      if (!symbol || isNaN(price) || price <= 0 || seen.has(symbol)) continue;
-      seen.add(symbol);
+    // 1. Primary TWSE source: MI_INDEX (updates immediately after 13:30 market close)
+    const miStockTable = miData?.tables?.find((t: any) => t.title?.includes('每日收盤行情'));
+    if (Array.isArray(miStockTable?.data)) {
+      for (const r of miStockTable.data) {
+        const symbol = r[0]?.trim();
+        const price = parseFloat((r[8] || '').replace(/,/g, ''));
+        if (!symbol || isNaN(price) || price <= 0 || seen.has(symbol)) continue;
+        seen.add(symbol);
 
-      const change = parseFloat(s.Change) || 0;
-      const yesterdayClose = Number((price - change).toFixed(2)) || price;
-      const changePercent = yesterdayClose > 0 ? Number(((change / yesterdayClose) * 100).toFixed(2)) : 0;
-      const openPrice = parseFloat(s.OpeningPrice) || price;
-      const highPrice = parseFloat(s.HighestPrice) || Math.max(price, openPrice);
-      const lowPrice = parseFloat(s.LowestPrice) || Math.min(price, openPrice);
-      const volume = Math.round((parseInt(s.TradeVolume, 10) || 0) / 1000);
+        const sign = (r[9] || '').includes('-') ? -1 : (r[9] || '').includes('+') ? 1 : 0;
+        const diffRaw = parseFloat((r[10] || '0').replace(/,/g, ''));
+        const change = isNaN(diffRaw) ? 0 : Number((diffRaw * sign).toFixed(2));
+        const yesterdayClose = Number((price - change).toFixed(2)) || price;
+        const changePercent = yesterdayClose > 0 ? Number(((change / yesterdayClose) * 100).toFixed(2)) : 0;
+        const openPrice = parseFloat((r[5] || '').replace(/,/g, '')) || price;
+        const highPrice = parseFloat((r[6] || '').replace(/,/g, '')) || Math.max(price, openPrice);
+        const lowPrice = parseFloat((r[7] || '').replace(/,/g, '')) || Math.min(price, openPrice);
+        const volume = Math.max(1, Math.round((parseInt((r[2] || '0').replace(/,/g, ''), 10) || 0) / 1000));
 
-      results.push({
-        symbol,
-        name: s.Name?.trim(),
-        market: '上市',
-        price,
-        yesterdayClose,
-        change,
-        changePercent,
-        openPrice,
-        highPrice,
-        lowPrice,
-        volume,
-        lastUpdated: '13:30:00',
-      });
+        const itemObj = {
+          symbol,
+          name: r[1]?.trim(),
+          market: '上市',
+          price,
+          yesterdayClose,
+          change,
+          changePercent,
+          openPrice,
+          highPrice,
+          lowPrice,
+          volume,
+          lastUpdated: '13:30:00',
+        };
+        results.push(itemObj);
+        allQuotesMap.set(symbol, itemObj);
+      }
     }
 
-    for (const s of tpexData) {
-      const symbol = s.SecuritiesCompanyCode?.trim();
-      const price = parseFloat(s.Close);
-      if (!symbol || isNaN(price) || price <= 0 || seen.has(symbol)) continue;
-      seen.add(symbol);
+    // 2. Fallback TWSE source: STOCK_DAY_ALL (for any symbol not in MI_INDEX)
+    if (Array.isArray(twseData)) {
+      for (const s of twseData) {
+        const symbol = s.Code?.trim();
+        const price = parseFloat(s.ClosingPrice);
+        if (!symbol || isNaN(price) || price <= 0 || seen.has(symbol)) continue;
+        seen.add(symbol);
 
-      const change = parseFloat(s.Change) || 0;
-      const yesterdayClose = Number((price - change).toFixed(2)) || price;
-      const changePercent = yesterdayClose > 0 ? Number(((change / yesterdayClose) * 100).toFixed(2)) : 0;
-      const openPrice = parseFloat(s.Open) || price;
-      const highPrice = parseFloat(s.High) || Math.max(price, openPrice);
-      const lowPrice = parseFloat(s.Low) || Math.min(price, openPrice);
-      const volume = Math.round((parseInt(s.TradingShares, 10) || 0) / 1000);
+        const change = parseFloat(s.Change) || 0;
+        const yesterdayClose = Number((price - change).toFixed(2)) || price;
+        const changePercent = yesterdayClose > 0 ? Number(((change / yesterdayClose) * 100).toFixed(2)) : 0;
+        const openPrice = parseFloat(s.OpeningPrice) || price;
+        const highPrice = parseFloat(s.HighestPrice) || Math.max(price, openPrice);
+        const lowPrice = parseFloat(s.LowestPrice) || Math.min(price, openPrice);
+        const volume = Math.round((parseInt(s.TradeVolume, 10) || 0) / 1000);
 
-      results.push({
-        symbol,
-        name: s.CompanyName?.trim(),
-        market: '上櫃',
-        price,
-        yesterdayClose,
-        change,
-        changePercent,
-        openPrice,
-        highPrice,
-        lowPrice,
-        volume,
-        lastUpdated: '13:30:00',
-      });
+        const itemObj = {
+          symbol,
+          name: s.Name?.trim(),
+          market: '上市',
+          price,
+          yesterdayClose,
+          change,
+          changePercent,
+          openPrice,
+          highPrice,
+          lowPrice,
+          volume,
+          lastUpdated: '13:30:00',
+        };
+        results.push(itemObj);
+        allQuotesMap.set(symbol, itemObj);
+      }
+    }
+
+    // 3. TPEx OTC source: tpex_mainboard_quotes
+    if (Array.isArray(tpexData)) {
+      for (const s of tpexData) {
+        const symbol = s.SecuritiesCompanyCode?.trim();
+        const price = parseFloat(s.Close);
+        if (!symbol || isNaN(price) || price <= 0 || seen.has(symbol)) continue;
+        seen.add(symbol);
+
+        const change = parseFloat(s.Change) || 0;
+        const yesterdayClose = Number((price - change).toFixed(2)) || price;
+        const changePercent = yesterdayClose > 0 ? Number(((change / yesterdayClose) * 100).toFixed(2)) : 0;
+        const openPrice = parseFloat(s.Open) || price;
+        const highPrice = parseFloat(s.High) || Math.max(price, openPrice);
+        const lowPrice = parseFloat(s.Low) || Math.min(price, openPrice);
+        const volume = Math.round((parseInt(s.TradingShares, 10) || 0) / 1000);
+
+        const itemObj = {
+          symbol,
+          name: s.CompanyName?.trim(),
+          market: '上櫃',
+          price,
+          yesterdayClose,
+          change,
+          changePercent,
+          openPrice,
+          highPrice,
+          lowPrice,
+          volume,
+          lastUpdated: '13:30:00',
+        };
+        results.push(itemObj);
+        allQuotesMap.set(symbol, itemObj);
+      }
     }
 
     if (results.length > 0) {
       allQuotesCache = { timestamp: now, data: results };
       return results;
     }
-  } catch (err) {
-    console.warn('Failed to fetch full OpenAPI quotes, using cache/fallback:', err);
+  } catch {
+    // Silently fall back to cached or local master database
   }
 
-  // Fallback to local master database
-  const { TAIWAN_STOCK_MASTER } = await import('./src/data/taiwanStockMaster');
   return allQuotesCache?.data || TAIWAN_STOCK_MASTER;
 }
 
@@ -216,8 +410,7 @@ app.get('/api/stock/quote', async (req: Request, res: Response) => {
       data: twseData,
     });
   } catch (err: any) {
-    console.error('Error in /api/stock/quote:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || 'Quote query error' });
   }
 });
 
@@ -230,15 +423,14 @@ app.get('/api/stock/batch-quotes', async (req: Request, res: Response) => {
     }
 
     const symbols = rawSymbols.split(',').map((s) => s.trim()).filter(Boolean);
-    const results = await Promise.all(symbols.map((sym) => queryTWSEQuote(sym)));
+    const results = await queryTWSEBatchQuotes(symbols);
 
     return res.json({
       success: true,
-      data: results.filter(Boolean),
+      data: results,
     });
   } catch (err: any) {
-    console.error('Error in /api/stock/batch-quotes:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || 'Batch quote query error' });
   }
 });
 
@@ -251,11 +443,10 @@ app.get('/api/stock/all-quotes', async (req: Request, res: Response) => {
       success: true,
       count: quotes.length,
       data: quotes,
-      lastUpdated: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+      lastUpdated: '每日下午 13:30 收盤價',
     });
   } catch (err: any) {
-    console.error('Error in /api/stock/all-quotes:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || 'All quotes query error' });
   }
 });
 
@@ -525,6 +716,8 @@ app.post('/api/ai/ask-analyst', async (req: Request, res: Response) => {
 
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (_req, res) => {
@@ -532,14 +725,18 @@ async function startServer() {
     });
   } else {
     const { createServer: createViteServer } = await import('vite');
+    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: isHmrDisabled ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(Number(PORT), '0.0.0.0', () => {
+  httpServer.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
 }

@@ -9,6 +9,32 @@
     <meta property="og:description" content="輸入台股股名即刻獲取三竹核心籌碼、大單買賣超、本益比、EPS、營收與位階評估，結合阿法貝塔值與主力軌跡，生成AI投資建議報告與即時警示。" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Runtime Environment: HMR is disabled in preview iframe; ignore Vite WebSocket connection errors
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason;
+        var msg = reason && (reason.message || String(reason));
+        var stack = reason && reason.stack ? String(reason.stack) : '';
+        if (
+          (msg && (msg.indexOf('WebSocket') !== -1 || msg.indexOf('vite:ws') !== -1)) ||
+          stack.indexOf('@vite/client') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function (event) {
+        var msg = event.message || '';
+        var filename = event.filename || '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          filename.indexOf('@vite/client') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    </script>
   </head>
   <body>
     <div id="root"></div>

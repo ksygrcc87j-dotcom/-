@@ -8,12 +8,13 @@ import { InteractiveCharts } from './components/InteractiveCharts';
 import { AIReportSection } from './components/AIReportSection';
 import { MultiStockComparison } from './components/MultiStockComparison';
 import { StockDirectoryView } from './components/StockDirectoryView';
+import { DailyMomentumScanner } from './components/DailyMomentumScanner';
 import { AlertModal } from './components/AlertModal';
 import { AlertHistoryDrawer } from './components/AlertHistoryDrawer';
 import { LiveToastAlerts } from './components/LiveToastAlerts';
 
 import { StockData, AlertRule, TriggeredAlert, AIInvestmentReport, IntradayTick } from './types/stock';
-import { getOrGenerateStockData, PRELOADED_STOCKS, TAIWAN_STOCK_MASTER } from './data/mockStocks';
+import { getOrGenerateStockData, PRELOADED_STOCKS, TAIWAN_STOCK_MASTER, applyLiveQuoteToStockData } from './data/mockStocks';
 import { 
   loadAlertRules, 
   saveAlertRules, 
@@ -23,14 +24,14 @@ import {
   sendBrowserPushNotification, 
   playAlertBeep 
 } from './services/alertService';
-import { LayoutDashboard, Columns, FileSpreadsheet, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Columns, FileSpreadsheet, Sparkles, Flame, Zap, ArrowRight } from 'lucide-react';
 
 const WATCHLIST_STORAGE_KEY = 'sanzhu_watchlist_v1';
 const DEFAULT_WATCHLIST = ['2330', '2317', '2454', '2603', '2382', '3231'];
 
 export default function App() {
-  // Current view mode: 'single' (個股新摘要表) | 'comparison' (多檔標的同步對照) | 'directory' (股號股名與收盤價總表)
-  const [viewMode, setViewMode] = useState<'single' | 'comparison' | 'directory'>('single');
+  // Current view mode: 'single' (個股新摘要表) | 'comparison' (多檔標的同步對照) | 'directory' (股號股名與收盤價總表) | 'momentum' (每日高動能 20 檔)
+  const [viewMode, setViewMode] = useState<'single' | 'comparison' | 'directory' | 'momentum'>('single');
 
   // Current stock state (defaults to TSMC 2330 closing data)
   const [stock, setStock] = useState<StockData>(() => PRELOADED_STOCKS['2330']);
@@ -70,7 +71,7 @@ export default function App() {
   const [isSyncingAllQuotes, setIsSyncingAllQuotes] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<string>('13:30:00');
 
-  // Full market sync from TWSE/TPEx official API
+  // full market sync from TWSE/TPEx official API
   const syncAllMarketQuotes = useCallback(async (forceRefresh = false) => {
     setIsSyncingAllQuotes(true);
     try {
@@ -92,20 +93,7 @@ export default function App() {
         setStock((currentStock) => {
           const live = map[currentStock.symbol];
           if (live) {
-            return {
-              ...currentStock,
-              name: live.name || currentStock.name,
-              price: live.price,
-              yesterdayClose: live.yesterdayClose,
-              change: live.change,
-              changePercent: live.changePercent,
-              openPrice: live.openPrice,
-              highPrice: live.highPrice,
-              lowPrice: live.lowPrice,
-              volume: live.volume,
-              totalAmount: Number(((live.volume * live.price) / 10000).toFixed(2)),
-              lastUpdated: live.lastUpdated || '13:30:00',
-            };
+            return applyLiveQuoteToStockData(currentStock, live);
           }
           return currentStock;
         });
@@ -117,9 +105,33 @@ export default function App() {
     }
   }, []);
 
-  // Initial sync on mount
+  // Initial sync on mount & background schedule check (每日收盤價 下午 13:30)
   useEffect(() => {
     syncAllMarketQuotes(false);
+
+    // Periodic check every 15 seconds for crossing 13:30 daily closing price update time
+    let lastSlot = '';
+    const interval = setInterval(() => {
+      const now = new Date();
+      const hour = now.getHours();
+      const min = now.getMinutes();
+      const today = now.toISOString().slice(0, 10);
+      
+      let currentSlot = '';
+      if (hour < 13 || (hour === 13 && min < 30)) {
+        currentSlot = `${today}_pre1330`;
+      } else {
+        currentSlot = `${today}_post1330`;
+      }
+
+      if (lastSlot && lastSlot !== currentSlot) {
+        // Trigger auto refresh at 13:30 closing time
+        syncAllMarketQuotes(true);
+      }
+      lastSlot = currentSlot;
+    }, 15000);
+
+    return () => clearInterval(interval);
   }, [syncAllMarketQuotes]);
 
   // Persist watchlist, alert rules and history
@@ -161,7 +173,9 @@ export default function App() {
 
   // Handle stock selection with instant cache & authoritative TWSE quote fetch
   const handleSelectStock = useCallback(async (query: string) => {
-    const initialStock = getOrGenerateStockData(query);
+    const baseStock = getOrGenerateStockData(query);
+    const cachedLive = liveQuotes[baseStock.symbol];
+    const initialStock = cachedLive ? applyLiveQuoteToStockData(baseStock, cachedLive) : baseStock;
     setStock(initialStock);
     setLatestTick(null);
 
@@ -182,36 +196,7 @@ export default function App() {
           if (prev.symbol !== initialStock.symbol && prev.name !== initialStock.name) {
             return prev;
           }
-          const price = twse.price;
-          const yesterdayClose = twse.yesterdayClose;
-          const change = twse.change;
-          const changePercent = twse.changePercent;
-          const openPrice = twse.openPrice;
-          const highPrice = twse.highPrice;
-          const lowPrice = twse.lowPrice;
-          const volume = twse.volume;
-
-          return {
-            ...prev,
-            name: twse.name || prev.name,
-            symbol: twse.symbol || prev.symbol,
-            market: twse.market || prev.market,
-            price,
-            yesterdayClose,
-            change,
-            changePercent,
-            openPrice,
-            highPrice,
-            lowPrice,
-            volume,
-            totalAmount: Number(((volume * price) / 10000).toFixed(2)),
-            orderBook: {
-              ...prev.orderBook,
-              bids: twse.bids && twse.bids.length > 0 ? twse.bids : prev.orderBook.bids,
-              asks: twse.asks && twse.asks.length > 0 ? twse.asks : prev.orderBook.asks,
-            },
-            lastUpdated: twse.lastUpdated || '13:30:00',
-          };
+          return applyLiveQuoteToStockData(prev, twse);
         });
 
         // Also update liveQuotes map
@@ -222,7 +207,7 @@ export default function App() {
     } catch (e) {
       console.warn('TWSE quote fetch failed, fallback maintained:', e);
     }
-  }, []);
+  }, [liveQuotes]);
 
   // Watchlist handlers
   const handleToggleWatchlist = (symbol: string) => {
@@ -462,12 +447,12 @@ export default function App() {
           liveQuotes={liveQuotes}
         />
 
-        {/* View Switcher: Mitake Preview 1 (個股新摘要表) vs Mitake Preview 2 (多檔標的同步對照) */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div className="flex items-center space-x-2">
+        {/* View Switcher: Mitake Preview 1 (個股新摘要表) vs Mitake Preview 2 (多檔標的同步對照) vs 每日高動能 20 檔 vs 全台股總表 */}
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between border-b border-slate-800 pb-3 gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setViewMode('single')}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
                 viewMode === 'single'
                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/25 ring-2 ring-blue-400/30'
                   : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-850 border border-slate-800'
@@ -478,8 +463,23 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setViewMode('momentum')}
+              className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                viewMode === 'momentum'
+                  ? 'bg-gradient-to-r from-rose-600 to-amber-600 text-white shadow-lg shadow-rose-600/30 ring-2 ring-rose-400/40'
+                  : 'bg-slate-900 text-slate-300 hover:text-white hover:bg-slate-850 border border-slate-800'
+              }`}
+            >
+              <Flame className="w-4 h-4 text-rose-400" />
+              <span>每日高動能 30 檔（15低價 + 10中價 + 5高價）</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold border border-rose-500/40 animate-pulse">
+                TOP 30 篩選
+              </span>
+            </button>
+
+            <button
               onClick={() => setViewMode('comparison')}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
                 viewMode === 'comparison'
                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/25 ring-2 ring-blue-400/30'
                   : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-850 border border-slate-800'
@@ -494,7 +494,7 @@ export default function App() {
 
             <button
               onClick={() => setViewMode('directory')}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
                 viewMode === 'directory'
                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/25 ring-2 ring-blue-400/30'
                   : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-850 border border-slate-800'
@@ -508,9 +508,9 @@ export default function App() {
             </button>
           </div>
 
-          <div className="hidden md:flex items-center space-x-2 text-xs text-slate-400 font-medium">
+          <div className="hidden lg:flex items-center space-x-2 text-xs text-slate-400 font-medium shrink-0">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>資料源參照：證交所 (TWSE/TPEx) 官方全市場 OpenAPI · 藍三竹 App 籌碼庫 (收錄 2,357 檔)</span>
+            <span>證交所官方 OpenAPI • 三竹籌碼動能庫 (2,357 檔)</span>
           </div>
         </div>
 
@@ -532,6 +532,72 @@ export default function App() {
         {/* View Mode 1: 個股新摘要表 */}
         {viewMode === 'single' && (
           <div className="space-y-6">
+            {/* Quick Daily Momentum Top Picks Carousel Banner */}
+            <div className="bg-gradient-to-r from-rose-950/40 via-slate-900 to-amber-950/30 border border-rose-500/30 rounded-2xl p-3 sm:p-4 shadow-lg flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+              <div className="flex items-center space-x-2.5 shrink-0">
+                <div className="w-8 h-8 rounded-lg bg-rose-600/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shadow-inner">
+                  <Flame className="w-4 h-4 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold text-rose-300">🔥 今日高動能 30 檔精選快報：</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-400 font-bold font-mono">
+                      15檔低價股 + 10檔中價股 + 5檔高價股 · 每日收盤價 下午 13:30 更新
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-slate-400 hidden sm:inline">
+                    四大指標篩選：高動能、周轉率高、多空比、主力收貨中，點擊任一標的立即深度診斷
+                  </span>
+                </div>
+              </div>
+
+              {/* Quick Stock Pills (Live Synchronized with TWSE/TPEx) */}
+              <div className="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto py-0.5 no-scrollbar">
+                {[
+                  { symbol: '2330', name: '台積電', tag: '👑高價' },
+                  { symbol: '2317', name: '鴻海', tag: '🎯中價' },
+                  { symbol: '3231', name: '緯創', tag: '🎯中價' },
+                  { symbol: '2882', name: '國泰金', tag: '🎯中價' },
+                  { symbol: '6209', name: '今國光', tag: '🎯中價' },
+                  { symbol: '1301', name: '台塑', tag: '🪙低價' },
+                  { symbol: '1504', name: '東元', tag: '🪙低價' },
+                  { symbol: '2884', name: '玉山金', tag: '🪙低價' },
+                  { symbol: '3481', name: '群創', tag: '🪙低價' },
+                ].map((s) => {
+                  const live = liveQuotes[s.symbol];
+                  const master = TAIWAN_STOCK_MASTER.find((m) => m.symbol === s.symbol);
+                  const currentPrice = live?.price ?? master?.price ?? 0;
+                  const changePct = live?.changePercent ?? master?.changePercent ?? 0;
+                  const formattedPrice = currentPrice >= 1000 ? currentPrice.toLocaleString() : String(currentPrice);
+                  const formattedChange = `${changePct > 0 ? '+' : ''}${Number(changePct).toFixed(2)}%`;
+                  const isUp = changePct >= 0;
+
+                  return (
+                    <button
+                      key={s.symbol}
+                      onClick={() => handleSelectStock(s.symbol)}
+                      className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-rose-500/40 text-xs text-slate-300 transition-all shrink-0 font-mono"
+                    >
+                      <span className="font-bold text-slate-100">{s.name}</span>
+                      <span className="text-slate-400 text-[10px]">
+                        {s.tag}{formattedPrice}元
+                      </span>
+                      <span className={`font-bold text-[10px] ${isUp ? 'text-rose-400' : 'text-emerald-400'}`}>
+                        {formattedChange}
+                      </span>
+                    </button>
+                  );
+                })}
+
+                <button
+                  onClick={() => setViewMode('momentum')}
+                  className="flex items-center space-x-1 px-3 py-1 rounded-lg bg-rose-600/30 hover:bg-rose-600 text-rose-200 hover:text-white border border-rose-500/40 text-xs font-bold transition-all shrink-0 ml-1"
+                >
+                  <span>15低+10中+5高 進入完整30檔 ➔</span>
+                </button>
+              </div>
+            </div>
+
             {/* Stock Overview Header */}
             <StockOverviewHeader
               stock={stock}
@@ -562,7 +628,25 @@ export default function App() {
           </div>
         )}
 
-        {/* View Mode 2: 多檔標的同步對照 */}
+        {/* View Mode 2: 每日高動能 20 檔篩選器 */}
+        {viewMode === 'momentum' && (
+          <div className="space-y-6">
+            <DailyMomentumScanner
+              onSelectStock={(sym) => {
+                handleSelectStock(sym);
+                setViewMode('single');
+              }}
+              watchlistSymbols={watchlistSymbols}
+              onToggleWatchlist={handleToggleWatchlist}
+              liveQuotes={liveQuotes}
+              lastSyncTime={lastSyncTime}
+              onRefreshQuotes={() => syncAllMarketQuotes(true)}
+              isSyncing={isSyncingAllQuotes}
+            />
+          </div>
+        )}
+
+        {/* View Mode 3: 多檔標的同步對照 */}
         {viewMode === 'comparison' && (
           <div className="space-y-6">
             <MultiStockComparison
@@ -586,7 +670,7 @@ export default function App() {
           </div>
         )}
 
-        {/* View Mode 3: 台股全股號·股名·官方收盤價 應對總表 */}
+        {/* View Mode 4: 台股全股號·股名·官方收盤價 應對總表 */}
         {viewMode === 'directory' && (
           <div className="space-y-6">
             <StockDirectoryView

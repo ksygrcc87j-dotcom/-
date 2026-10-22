@@ -67,8 +67,8 @@ export const StockSearchBar: React.FC<StockSearchBarProps> = ({
             <Wifi className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
             <span>已連線證交所 (TWSE/TPEx) 及藍三竹股市 App 數據庫</span>
           </span>
-          <span className="text-slate-400 text-[11px] hidden md:inline">
-            收盤結算籌碼已同步 · 資料庫收錄全市場 2,357 檔標的
+          <span className="text-slate-300 text-[11px] hidden md:inline">
+            每日更新時間：<strong className="text-emerald-400 font-mono">下午 13:30 每日收盤價</strong> · 資料庫收錄全市場 2,357 檔標的
             {lastSyncTime && <span className="ml-1 text-slate-500">({lastSyncTime})</span>}
           </span>
         </div>
