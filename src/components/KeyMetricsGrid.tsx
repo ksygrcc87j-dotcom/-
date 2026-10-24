@@ -155,10 +155,13 @@ export const KeyMetricsGrid: React.FC<KeyMetricsGridProps> = ({ stock }) => {
     return concTrend.days[concTrend.days.length - 1];
   }, [concTrend, hoveredConcDayIdx]);
 
-  // Chip Flow Bull/Bear Radar Data
+  // 20-Day Major Chip Bull/Bear Radar Data (主力籌碼多空雷達：散戶流向、大單淨買賣、融資餘額、借券賣出、外資投信持股比例)
   const chipRadar = useMemo(() => calculateChipRadarData(stock), [stock]);
-  const [radarViewMode, setRadarViewMode] = useState<'radar' | 'actors'>('radar');
-  const [hoveredRadarMetric, setHoveredRadarMetric] = useState<string | null>(null);
+  const [chipRadarOverlayMode, setChipRadarOverlayMode] = useState<'vs20dAgo' | 'all3Stages' | 'vsBenchmark'>('vs20dAgo');
+  const [selectedChipAxisId, setSelectedChipAxisId] = useState<string>('largeOrderNet');
+  const activeChipAxis = useMemo(() => {
+    return chipRadar.radarData.find((d) => d.id === selectedChipAxisId) || chipRadar.radarData[0];
+  }, [chipRadar, selectedChipAxisId]);
 
   // Stock Risk Early Warning Matrix Data
   const riskMatrix = useMemo(() => calculateStockRiskMatrix(stock), [stock]);
@@ -634,6 +637,411 @@ export const KeyMetricsGrid: React.FC<KeyMetricsGridProps> = ({ stock }) => {
             <span className="font-bold text-slate-200">
               {turnoverRate > 8 ? '🔥 爆量過熱警示' : turnoverRate > 3 ? '✅ 活躍健康換手' : '🌱 量縮溫和整理'}
             </span>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION: 主力籌碼多空雷達 (過去 20 日籌碼結構變化：散戶流向、大單淨買賣、融資餘額、借券賣出、外資投信持股比例) */}
+      <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-rose-950/25 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
+        {/* Header */}
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-5">
+          <div className="flex items-start sm:items-center space-x-3">
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-inner ${
+                chipRadar.compositeScore >= 60
+                  ? 'bg-rose-600/25 border border-rose-500/50 text-rose-400'
+                  : chipRadar.compositeScore >= 45
+                  ? 'bg-amber-600/25 border border-amber-500/50 text-amber-400'
+                  : 'bg-emerald-600/25 border border-emerald-500/50 text-emerald-400'
+              }`}
+            >
+              <Compass className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-bold text-slate-100">
+                  主力籌碼多空雷達 (20-Day Major Chip Bull/Bear Radar)
+                </h3>
+                <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold ${chipRadar.compositeTagClass}`}>
+                  {chipRadar.compositeStatus}
+                </span>
+                <span className="text-xs px-2.5 py-0.5 rounded-md font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">
+                  多空總分: {chipRadar.compositeScore} 分 (20日{' '}
+                  {chipRadar.compositeDelta20d >= 0 ? '+' : ''}
+                  {chipRadar.compositeDelta20d}分)
+                </span>
+                <span className="text-xs px-2.5 py-0.5 rounded-md font-bold bg-slate-800/90 text-amber-300 border border-amber-500/30">
+                  博弈格局：{chipRadar.snapshot20d.gamePatternLabel}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                將過去 20 日的五大核心籌碼結構變化（「大單淨買賣」、「外資投信持股比例」、「融資餘額」、「借券賣出」、「散戶流向」）以五維度雷達圖呈現，一目了然個股目前的多空籌碼博弈狀況
+              </p>
+            </div>
+          </div>
+
+          {/* 20-Day Structure Comparison Mode Toggle */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="flex items-center bg-slate-950/80 border border-slate-800 rounded-lg p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setChipRadarOverlayMode('vs20dAgo')}
+                className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                  chipRadarOverlayMode === 'vs20dAgo'
+                    ? 'bg-rose-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                最新 vs 20日前結構
+              </button>
+              <button
+                type="button"
+                onClick={() => setChipRadarOverlayMode('all3Stages')}
+                className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                  chipRadarOverlayMode === 'all3Stages'
+                    ? 'bg-rose-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                20日前 / 5日前 / 最新演進
+              </button>
+              <button
+                type="button"
+                onClick={() => setChipRadarOverlayMode('vsBenchmark')}
+                className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                  chipRadarOverlayMode === 'vsBenchmark'
+                    ? 'bg-rose-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                對比 50分多空基準
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Main 12-Col Grid: Left 6 Cols Recharts 5-Axis Radar Chart, Right 6 Cols 5-Dimension 20-Day Evolution Matrix */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-5">
+          {/* LEFT 6 Cols: 20-Day Chip Structure Radar Chart */}
+          <div className="lg:col-span-6 bg-slate-950/75 border border-slate-800/90 rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden">
+            <div
+              className="absolute w-60 h-60 rounded-full blur-3xl pointer-events-none opacity-15 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+              style={{
+                backgroundColor:
+                  chipRadar.compositeScore >= 60
+                    ? '#f43f5e'
+                    : chipRadar.compositeScore >= 45
+                    ? '#f59e0b'
+                    : '#10b981',
+              }}
+            />
+
+            <div className="w-full flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 px-1 mb-1 relative z-10">
+              <span className="font-bold text-slate-200 flex items-center">
+                <Activity className="w-3.5 h-3.5 mr-1.5 text-rose-400" />
+                過去 20 日籌碼結構變化雷達 (0 ~ 100 分)
+              </span>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono">
+                <span className="flex items-center">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-rose-500 mr-1" />
+                  當前最新 ({chipRadar.polygonAreaPct}%面積)
+                </span>
+                {chipRadarOverlayMode === 'all3Stages' && (
+                  <span className="flex items-center">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-amber-400 mr-1" />
+                    5日前
+                  </span>
+                )}
+                {(chipRadarOverlayMode === 'vs20dAgo' || chipRadarOverlayMode === 'all3Stages') && (
+                  <span className="flex items-center">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-sky-400 mr-1" />
+                    20日前 ({chipRadar.polygonArea20dAgoPct}%面積)
+                  </span>
+                )}
+                <span className="flex items-center">
+                  <span className="w-2.5 h-0.5 bg-slate-400 mr-1" />
+                  50分均衡線
+                </span>
+              </div>
+            </div>
+
+            {/* Recharts RadarChart */}
+            <div className="w-full h-72 sm:h-80 relative select-none z-10">
+              <ResponsiveContainer width="100%" height="100%">
+                <RadarChart cx="50%" cy="50%" outerRadius="73%" data={chipRadar.radarData}>
+                  <PolarGrid stroke="#334155" strokeDasharray="3,3" />
+                  <PolarAngleAxis
+                    dataKey="subject"
+                    tick={{ fill: '#f1f5f9', fontSize: 12, fontWeight: 700 }}
+                  />
+                  <PolarRadiusAxis
+                    angle={18}
+                    domain={[0, 100]}
+                    stroke="#475569"
+                    tick={{ fill: '#64748b', fontSize: 9 }}
+                    tickCount={5}
+                  />
+
+                  {/* 50 Baseline Neutral Benchmark Polygon */}
+                  <Radar
+                    name="多空均衡基準 (50分)"
+                    dataKey="benchmark"
+                    stroke="#64748b"
+                    strokeWidth={1.2}
+                    fill="#64748b"
+                    fillOpacity={chipRadarOverlayMode === 'vsBenchmark' ? 0.14 : 0.05}
+                    strokeDasharray="3,3"
+                  />
+
+                  {/* 20 Days Ago Chip Structure Polygon */}
+                  {(chipRadarOverlayMode === 'vs20dAgo' || chipRadarOverlayMode === 'all3Stages') && (
+                    <Radar
+                      name="20日前籌碼結構"
+                      dataKey="score20dAgo"
+                      stroke="#38bdf8"
+                      strokeWidth={2}
+                      strokeDasharray="4,2"
+                      fill="#38bdf8"
+                      fillOpacity={0.16}
+                    />
+                  )}
+
+                  {/* 5 Days Ago Chip Structure Polygon */}
+                  {chipRadarOverlayMode === 'all3Stages' && (
+                    <Radar
+                      name="5日前籌碼結構"
+                      dataKey="score5dAgo"
+                      stroke="#fbbf24"
+                      strokeWidth={1.8}
+                      strokeDasharray="2,2"
+                      fill="#fbbf24"
+                      fillOpacity={0.14}
+                    />
+                  )}
+
+                  {/* Current Latest 20-Day Chip Structure Polygon */}
+                  <Radar
+                    name={`${stock.name} 最新籌碼結構`}
+                    dataKey="score"
+                    stroke={
+                      chipRadar.compositeScore >= 60
+                        ? '#f43f5e'
+                        : chipRadar.compositeScore >= 45
+                        ? '#f59e0b'
+                        : '#10b981'
+                    }
+                    strokeWidth={2.5}
+                    fill={
+                      chipRadar.compositeScore >= 60
+                        ? '#f43f5e'
+                        : chipRadar.compositeScore >= 45
+                        ? '#f59e0b'
+                        : '#10b981'
+                    }
+                    fillOpacity={0.38}
+                  />
+
+                  <RechartsTooltip
+                    content={({ active, payload }) => {
+                      if (active && payload && payload.length) {
+                        const data = payload[0].payload as any;
+                        return (
+                          <div className="bg-slate-950/95 border border-slate-700/80 p-3 rounded-xl shadow-2xl backdrop-blur-md text-xs font-mono max-w-xs z-50">
+                            <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-1.5 mb-1.5">
+                              <span className="font-bold text-slate-100 flex items-center">
+                                <span
+                                  className="w-2 h-2 rounded-full mr-1.5"
+                                  style={{ backgroundColor: data.statusColor }}
+                                />
+                                {data.subject} ({data.actorLabel})
+                              </span>
+                              <span
+                                className="px-1.5 py-0.5 rounded text-[10px] font-bold"
+                                style={{
+                                  backgroundColor: `${data.statusColor}22`,
+                                  color: data.statusColor,
+                                }}
+                              >
+                                {data.statusLabel}
+                              </span>
+                            </div>
+                            <div className="space-y-1 text-[11px]">
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">最新多方評分:</span>
+                                <span className="font-bold text-rose-400">{data.score} 分</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">20日前基準評分:</span>
+                                <span className="font-bold text-sky-400">{data.score20dAgo} 分</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">20日結構淨變化:</span>
+                                <span
+                                  className={`font-bold ${
+                                    data.delta20dScore >= 0 ? 'text-rose-400' : 'text-emerald-400'
+                                  }`}
+                                >
+                                  {data.delta20dScore >= 0 ? '+' : ''}
+                                  {data.delta20dScore} 分 ({data.directionLabel})
+                                </span>
+                              </div>
+                              <div className="flex justify-between pt-1 border-t border-slate-800/80">
+                                <span className="text-slate-400">當前水位:</span>
+                                <span className="font-bold text-slate-100">{data.currentValueDisplay}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">20日變化:</span>
+                                <span className="font-bold text-amber-300">{data.change20dDisplay}</span>
+                              </div>
+                            </div>
+                            <p className="mt-2 pt-1.5 border-t border-slate-800/80 text-[10px] text-slate-300 font-sans leading-relaxed">
+                              {data.gameInsight}
+                            </p>
+                          </div>
+                        );
+                      }
+                      return null;
+                    }}
+                  />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Bottom Summary Strip inside Radar Card */}
+            <div className="pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono relative z-10">
+              <span className="text-slate-400">
+                雷達多方覆蓋面積：
+                <strong className="text-slate-100 ml-1">
+                  20日前 {chipRadar.polygonArea20dAgoPct}% ➔ 最新 {chipRadar.polygonAreaPct}%
+                </strong>
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded font-bold ${
+                  chipRadar.polygonAreaPct - chipRadar.polygonArea20dAgoPct >= 0
+                    ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                    : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                }`}
+              >
+                20日面積變動:{' '}
+                {chipRadar.polygonAreaPct - chipRadar.polygonArea20dAgoPct >= 0 ? '+' : ''}
+                {chipRadar.polygonAreaPct - chipRadar.polygonArea20dAgoPct}%p
+              </span>
+            </div>
+          </div>
+
+          {/* RIGHT 6 Cols: 5 Core Chip Dimensions 20-Day Evolution Breakdown Cards */}
+          <div className="lg:col-span-6 flex flex-col justify-between space-y-2.5">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs font-bold text-slate-200">
+                五大籌碼維度 · 過去 20 日結構變化明細 (點擊維度檢視深度博弈解讀)
+              </span>
+              <span className="text-[10px] text-slate-400 font-mono">20日前 ➔ 最新得分</span>
+            </div>
+
+            {chipRadar.radarData.map((item) => {
+              const isSelected = activeChipAxis.id === item.id;
+              const isImproved = item.delta20dScore >= 0;
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => setSelectedChipAxisId(item.id)}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-rose-950/30 border-rose-500/60 ring-1 ring-rose-500/30 shadow-md'
+                      : 'bg-slate-950/75 hover:bg-slate-900 border-slate-800/90 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center space-x-2">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: item.statusColor }}
+                      />
+                      <span className="text-xs sm:text-sm font-bold text-slate-100">
+                        {item.subject}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">
+                        {item.actorLabel}
+                      </span>
+                      <span
+                        className="text-[10px] px-2 py-0.2 rounded font-bold"
+                        style={{
+                          backgroundColor: `${item.statusColor}20`,
+                          color: item.statusColor,
+                        }}
+                      >
+                        {item.statusLabel}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center space-x-2 font-mono text-xs">
+                      <span className="text-slate-400 text-[11px]">{item.score20dAgo}分</span>
+                      <span className="text-slate-600">➔</span>
+                      <span className="font-extrabold text-white">{item.score}分</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                          isImproved
+                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        }`}
+                      >
+                        {isImproved ? '+' : ''}
+                        {item.delta20dScore}分
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Dual Progress Bar: 20d ago vs Current */}
+                  <div className="h-1.5 w-full bg-slate-900 rounded-full overflow-hidden mb-1.5 relative">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{
+                        width: `${item.score}%`,
+                        backgroundColor: item.statusColor,
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                    <span className="text-slate-300">
+                      目前：<strong className="text-slate-100">{item.currentValueDisplay}</strong>
+                    </span>
+                    <span className="text-amber-300 font-semibold">{item.change20dDisplay}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Bottom Deep Game Insight & Tactical Playbook Banner */}
+        <div className="bg-slate-950/85 border border-slate-800 rounded-xl p-4 grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+          <div className="bg-slate-900/70 p-3 rounded-lg border border-rose-500/30">
+            <div className="font-bold text-rose-300 mb-1 flex items-center justify-between">
+              <span className="flex items-center">
+                <Target className="w-3.5 h-3.5 mr-1.5 text-rose-400" />
+                焦點維度博弈剖析：{activeChipAxis.subject}
+              </span>
+              <span className="font-mono text-[11px] text-slate-300">{activeChipAxis.score} / 100分</span>
+            </div>
+            <p className="text-slate-300 leading-relaxed">{activeChipAxis.gameInsight}</p>
+          </div>
+
+          <div className="bg-slate-900/70 p-3 rounded-lg border border-slate-800/80">
+            <div className="font-bold text-slate-200 mb-1 flex items-center">
+              <Activity className="w-3.5 h-3.5 mr-1.5 text-cyan-400" />
+              過去 20 日籌碼結構總體研判
+            </div>
+            <p className="text-slate-400 leading-relaxed">{chipRadar.structureDiagnosis}</p>
+          </div>
+
+          <div className="bg-slate-900/70 p-3 rounded-lg border border-slate-800/80">
+            <div className="font-bold text-slate-200 mb-1 flex items-center">
+              <ShieldCheck className="w-3.5 h-3.5 mr-1.5 text-emerald-400" />
+              三竹籌碼博弈實戰對策
+            </div>
+            <p className="text-slate-400 leading-relaxed">{chipRadar.tacticalSummary}</p>
           </div>
         </div>
       </div>
@@ -1963,253 +2371,6 @@ export const KeyMetricsGrid: React.FC<KeyMetricsGridProps> = ({ stock }) => {
                 {riskMatrix.tacticalAdvice}
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION: 籌碼多空雷達圖 (Chip Flow Bull/Bear Radar Chart) */}
-      <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/25 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-5">
-          <div className="flex items-center space-x-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-inner ${
-              chipRadar.compositeScore >= 60
-                ? 'bg-rose-600/25 border border-rose-500/50 text-rose-400'
-                : chipRadar.compositeScore >= 45
-                ? 'bg-amber-600/25 border border-amber-500/50 text-amber-400'
-                : 'bg-emerald-600/25 border border-emerald-500/50 text-emerald-400'
-            }`}>
-              <Compass className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-base font-bold text-slate-100 flex items-center">
-                  籌碼多空雷達圖 (Chip Flow Bull/Bear Radar Chart)
-                </h3>
-                <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold ${chipRadar.compositeTagClass}`}>
-                  {chipRadar.compositeStatus}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded-md font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">
-                  量化總分: {chipRadar.compositeScore} 分
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                利用 Recharts 將主力、散戶、外資、投信的籌碼動向轉化為多維度雷達分布圖，快速視覺化當前的籌碼結構強弱
-              </p>
-            </div>
-          </div>
-
-          {/* Toggle view mode between radar chart and full actor breakdown */}
-          <div className="flex items-center space-x-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 text-xs">
-            <button
-              onClick={() => setRadarViewMode('radar')}
-              className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
-                radarViewMode === 'radar'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              多維雷達圖
-            </button>
-            <button
-              onClick={() => setRadarViewMode('actors')}
-              className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
-                radarViewMode === 'actors'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              四大陣營戰力
-            </button>
-          </div>
-        </div>
-
-        {/* Main Content: Recharts Radar and Actor Breakdown */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center mb-5">
-          {/* LEFT: Recharts RadarChart (7 cols on large screens) */}
-          <div className="lg:col-span-7 bg-slate-950/70 border border-slate-800/90 rounded-2xl p-4 flex flex-col items-center justify-center relative overflow-hidden min-h-[350px]">
-            {/* Radar Background Glow */}
-            <div 
-              className="absolute w-56 h-56 rounded-full blur-3xl pointer-events-none opacity-20"
-              style={{
-                backgroundColor: chipRadar.compositeScore >= 60 ? '#ef4444' : chipRadar.compositeScore >= 45 ? '#f59e0b' : '#10b981'
-              }}
-            />
-
-            <div className="w-full flex items-center justify-between text-xs text-slate-400 px-2 mb-1">
-              <span className="font-bold text-slate-200 flex items-center">
-                <Activity className="w-3.5 h-3.5 mr-1.5 text-indigo-400" />
-                6 大籌碼多空向度雷達 (0 ~ 100 分)
-              </span>
-              <div className="flex items-center space-x-3 text-[11px] font-mono">
-                <span className="flex items-center">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-rose-500 mr-1.5" />
-                  {stock.name} 籌碼能量
-                </span>
-                <span className="flex items-center">
-                  <span className="w-2.5 h-0.5 bg-slate-400 mr-1.5" />
-                  50分 中性分水嶺
-                </span>
-              </div>
-            </div>
-
-            {/* Recharts Container */}
-            <div className="w-full h-72 sm:h-80 relative select-none">
-              <ResponsiveContainer width="100%" height="100%">
-                <RadarChart cx="50%" cy="50%" outerRadius="72%" data={chipRadar.radarData}>
-                  <PolarGrid stroke="#334155" strokeDasharray="3,3" />
-                  <PolarAngleAxis 
-                    dataKey="subject" 
-                    tick={{ fill: '#cbd5e1', fontSize: 11, fontWeight: 600 }} 
-                  />
-                  <PolarRadiusAxis 
-                    angle={30} 
-                    domain={[0, 100]} 
-                    stroke="#475569" 
-                    tick={{ fill: '#64748b', fontSize: 9 }} 
-                  />
-
-                  {/* 50 Baseline Neutral Benchmark Polygon */}
-                  <Radar
-                    name="中性多空基準 (50分)"
-                    dataKey="benchmark"
-                    stroke="#64748b"
-                    fill="#64748b"
-                    fillOpacity={0.12}
-                    strokeDasharray="4,4"
-                  />
-
-                  {/* Stock's Real-time Chip Score Polygon */}
-                  <Radar
-                    name={`${stock.name} 籌碼能量`}
-                    dataKey="score"
-                    stroke={chipRadar.compositeScore >= 60 ? '#f43f5e' : chipRadar.compositeScore >= 45 ? '#fbbf24' : '#34d399'}
-                    fill={chipRadar.compositeScore >= 60 ? '#f43f5e' : chipRadar.compositeScore >= 45 ? '#fbbf24' : '#34d399'}
-                    fillOpacity={0.42}
-                  />
-
-                  <RechartsTooltip
-                    content={({ active, payload }) => {
-                      if (active && payload && payload.length) {
-                        const data = payload[0].payload as any;
-                        return (
-                          <div className="bg-slate-950/95 border border-slate-700/80 p-3 rounded-xl shadow-2xl backdrop-blur-md text-xs font-mono max-w-xs z-50">
-                            <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-1.5 mb-1.5">
-                              <span className="font-bold text-slate-100 flex items-center">
-                                <span className="w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: data.statusColor }} />
-                                {data.subject} ({data.actorLabel})
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ backgroundColor: `${data.statusColor}22`, color: data.statusColor }}>
-                                {data.statusLabel}
-                              </span>
-                            </div>
-                            <div className="space-y-1 text-[11px]">
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">當前籌碼得分:</span>
-                                <span className="font-bold text-white">{data.score} 分</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">市場中性基準:</span>
-                                <span className="text-slate-400">50 分</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">實時籌碼數據:</span>
-                                <span className="font-bold text-cyan-300">{data.rawDisplay}</span>
-                              </div>
-                            </div>
-                            <p className="mt-2 pt-1.5 border-t border-slate-800/80 text-[10px] text-slate-400 font-sans leading-tight">
-                              {data.description}
-                            </p>
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                </RadarChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Quick Helper Caption */}
-            <div className="w-full text-center text-[10px] text-slate-500 font-mono mt-1">
-              註：雷達頂點突出超過 50 分虛線代表該陣營/維度「多方優勢」；若收縮於 50 分以內則代表「賣壓或散亂」。
-            </div>
-          </div>
-
-          {/* RIGHT: 四大陣營多空戰力條 (5 cols on large screens) */}
-          <div className="lg:col-span-5 space-y-3">
-            <div className="text-xs font-bold text-slate-300 flex items-center justify-between px-1">
-              <span>四大陣營多空對峙戰力 (Major vs Retail vs Foreign vs Trust)</span>
-              <span className="text-[10px] text-slate-500 font-mono">淨多空力道</span>
-            </div>
-
-            {chipRadar.actors.map((actor) => {
-              const isBull = actor.netStrength >= 0;
-              return (
-                <div 
-                  key={actor.actor}
-                  className="bg-slate-950/75 border border-slate-800/80 rounded-xl p-3 hover:border-slate-700/80 transition-all"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: actor.color }} />
-                      <span className="text-xs font-bold text-slate-100">{actor.actorName}</span>
-                    </div>
-                    <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold border ${actor.badgeClass}`}>
-                      {actor.statusTag}
-                    </span>
-                  </div>
-
-                  {/* Multi-directional power comparison bar */}
-                  <div className="space-y-1 mb-2">
-                    <div className="flex justify-between items-center text-[10px] font-mono text-slate-400">
-                      <span>多方動能: <strong className="text-red-400">{actor.bullScore}分</strong></span>
-                      <span>空方調節: <strong className="text-emerald-400">{actor.bearScore}分</strong></span>
-                    </div>
-                    <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden flex border border-slate-800/60">
-                      <div 
-                        className="h-full bg-red-500 transition-all duration-500" 
-                        style={{ width: `${actor.bullScore}%` }} 
-                        title={`多方: ${actor.bullScore}%`}
-                      />
-                      <div 
-                        className="h-full bg-emerald-500 transition-all duration-500" 
-                        style={{ width: `${actor.bearScore}%` }} 
-                        title={`空方: ${actor.bearScore}%`}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Micro detail info */}
-                  <div className="text-[11px] text-slate-400 font-sans leading-relaxed">
-                    {actor.details}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Bottom: Comprehensive Chip Structure Diagnosis & Tactical Actionable Summary */}
-        <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div className="bg-slate-900/60 p-3 rounded-lg border border-slate-800/60">
-            <div className="font-bold text-slate-300 mb-1 flex items-center">
-              <Activity className="w-3.5 h-3.5 mr-1 text-cyan-400" />
-              籌碼結構實時研判 (Structure Diagnosis)
-            </div>
-            <p className="text-slate-400 leading-relaxed">
-              {chipRadar.structureDiagnosis}
-            </p>
-          </div>
-
-          <div className="bg-slate-900/60 p-3 rounded-lg border border-slate-800/60">
-            <div className="font-bold text-slate-300 mb-1 flex items-center">
-              <ShieldCheck className="w-3.5 h-3.5 mr-1 text-emerald-400" />
-              三竹首席量化操盤戰術 (Tactical Playbook)
-            </div>
-            <p className="text-slate-400 leading-relaxed">
-              {chipRadar.tacticalSummary}
-            </p>
           </div>
         </div>
       </div>

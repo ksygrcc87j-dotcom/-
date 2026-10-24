@@ -2,6 +2,7 @@ import { StockData, IntradayTick } from '../types/stock';
 
 export interface DailyCandle {
   date: string;
+  fullDate?: string; // YYYY-MM-DD
   open: number;
   high: number;
   low: number;
@@ -124,8 +125,38 @@ export function calculateKD(
   };
 }
 
+export function formatIsoDate(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 /**
- * Generate a deterministic and realistic 35-day historical daily candlestick series
+ * Get a default date range (startDate, endDate in YYYY-MM-DD) covering N trading days ending today
+ */
+export function getDefaultKlineDateRange(tradingDaysCount = 35): {
+  startDate: string;
+  endDate: string;
+} {
+  const today = new Date();
+  let d = new Date(today);
+  const dates: string[] = [];
+  while (dates.length < tradingDaysCount) {
+    const dayOfWeek = d.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      dates.unshift(formatIsoDate(d));
+    }
+    d.setDate(d.getDate() - 1);
+  }
+  return {
+    startDate: dates[0] || formatIsoDate(today),
+    endDate: dates[dates.length - 1] || formatIsoDate(today),
+  };
+}
+
+/**
+ * Generate a deterministic and realistic historical daily candlestick series
  * that aligns with stock's ma5, ma20, ma60, highPrice, lowPrice and price.
  */
 export function generateDailyCandles(stock: StockData, days = 35): DailyCandle[] {
@@ -143,37 +174,39 @@ export function generateDailyCandles(stock: StockData, days = 35): DailyCandle[]
     return seed / 233280;
   };
 
-  // Base starting price 35 days ago roughly around ma60
+  // Base starting price roughly around ma60
   const startPrice = stock.ma60 ? stock.ma60 * 0.98 : finalPrice * 0.92;
   const priceDelta = finalPrice - startPrice;
 
-  // Generate backwards or forwards
-  let runningClose = startPrice;
   const today = new Date();
 
   // Create date strings backwards for trading days
-  const tradingDates: string[] = [];
+  const tradingDates: { shortDate: string; fullDate: string }[] = [];
   let d = new Date(today);
   while (tradingDates.length < days) {
     const dayOfWeek = d.getDay();
     if (dayOfWeek !== 0 && dayOfWeek !== 6) {
       const mm = String(d.getMonth() + 1).padStart(2, '0');
       const dd = String(d.getDate()).padStart(2, '0');
-      tradingDates.unshift(`${mm}/${dd}`);
+      tradingDates.unshift({
+        shortDate: `${mm}/${dd}`,
+        fullDate: formatIsoDate(d),
+      });
     }
     d.setDate(d.getDate() - 1);
   }
 
   for (let i = 0; i < days; i++) {
     const isToday = i === days - 1;
-    const dateStr = tradingDates[i] || `Day-${i + 1}`;
+    const dateObj = tradingDates[i] || { shortDate: `Day-${i + 1}`, fullDate: formatIsoDate(today) };
 
     if (isToday) {
       // Ensure the final candle reflects current stock price/high/low
       const prevMaxHigh = candles.length > 0 ? Math.max(...candles.map((c) => c.high)) : finalHigh;
       const adjustedHigh = Math.max(finalHigh, Number((prevMaxHigh * 1.008).toFixed(1)));
       candles.push({
-        date: dateStr,
+        date: dateObj.shortDate,
+        fullDate: dateObj.fullDate,
         open: finalOpen,
         high: adjustedHigh,
         low: finalLow,
@@ -184,23 +217,17 @@ export function generateDailyCandles(stock: StockData, days = 35): DailyCandle[]
       break;
     }
 
-    const progress = i / (days - 1);
-    // Create a two-wave swing structure:
-    // Wave 1 surges strongly around i = 18..23 (driving KD & MACD to a high momentum peak),
-    // Pullback/consolidation around i = 24..29 (cooling MACD DIF & KD),
-    // Wave 2 pushes price to a new high at i = 31..34 (while KD/MACD stays below Wave 1 peak).
+    const progress = i / Math.max(1, days - 1);
     let waveBias = 0;
-    if (i >= 17 && i <= 23) {
-      // Sharp momentum surge in Wave 1
-      const wavePos = (i - 17) / 6;
+    const relIdxFromEnd = days - 1 - i;
+    if (relIdxFromEnd >= 11 && relIdxFromEnd <= 17) {
+      const wavePos = (17 - relIdxFromEnd) / 6;
       waveBias = Math.sin(wavePos * Math.PI) * (finalPrice * 0.048);
-    } else if (i >= 24 && i <= 29) {
-      // Consolidation pullback that resets indicator momentum
-      const dipPos = (i - 24) / 5;
+    } else if (relIdxFromEnd >= 5 && relIdxFromEnd <= 10) {
+      const dipPos = (10 - relIdxFromEnd) / 5;
       waveBias = -Math.sin(dipPos * Math.PI) * (finalPrice * 0.032);
-    } else if (i >= 30) {
-      // Gradual grind higher into final new price high
-      waveBias = ((i - 30) / 4) * (finalPrice * 0.018);
+    } else if (relIdxFromEnd <= 4) {
+      waveBias = ((4 - relIdxFromEnd) / 4) * (finalPrice * 0.018);
     }
 
     const expected = startPrice + priceDelta * Math.pow(progress, 1.05) + waveBias;
@@ -212,7 +239,8 @@ export function generateDailyCandles(stock: StockData, days = 35): DailyCandle[]
     const volume = Math.floor(finalVol * (0.6 + pseudoRandom() * 0.8));
 
     candles.push({
-      date: dateStr,
+      date: dateObj.shortDate,
+      fullDate: dateObj.fullDate,
       open,
       high,
       low,
@@ -220,10 +248,254 @@ export function generateDailyCandles(stock: StockData, days = 35): DailyCandle[]
       volume,
       isUp: close >= open,
     });
-    runningClose = close;
   }
 
   return candles;
+}
+
+export interface DateRangeKLinePackage {
+  candles: DailyCandle[];
+  ma5: (number | null)[];
+  ma20: (number | null)[];
+  ma60: (number | null)[];
+  kd: KDResult;
+  macd: MACDResult;
+  bollinger: BollingerBandsResult;
+  vwap: VWAPResult;
+  effectiveStartDate: string;
+  effectiveEndDate: string;
+  tradingDaysCount: number;
+  periodChange: number;
+  periodChangePct: number;
+  periodHigh: number;
+  periodLow: number;
+  totalVolume: number;
+}
+
+/**
+ * Generate Daily K-Line candles and full pre-warmed technical indicators (MA5/20/60, KD, MACD, Bollinger, VWAP)
+ * for any user-specified [startDateStr, endDateStr] date range.
+ */
+export function generateDailyKLineByDateRange(
+  stock: StockData,
+  startDateStr: string,
+  endDateStr: string
+): DateRangeKLinePackage {
+  const todayStr = formatIsoDate(new Date());
+  const rawStart = startDateStr || todayStr;
+  const rawEnd = endDateStr || todayStr;
+
+  // Normalize start <= end
+  const [normStartStr, normEndStr] =
+    rawStart <= rawEnd ? [rawStart, rawEnd] : [rawEnd, rawStart];
+
+  const parseLocal = (iso: string) => {
+    const parts = iso.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) return new Date();
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  };
+
+  const startDt = parseLocal(normStartStr);
+  const endDt = parseLocal(normEndStr);
+
+  // Collect trading days within [startDt, endDt]
+  const rangeDates: Date[] = [];
+  const cursor = new Date(startDt);
+  // Cap maximum span to 365 trading days for smooth SVG rendering
+  while (cursor <= endDt && rangeDates.length < 365) {
+    const dow = cursor.getDay();
+    if (dow !== 0 && dow !== 6) {
+      rangeDates.push(new Date(cursor));
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  // Ensure at least 5 trading days in the chart window (e.g., if user picked a weekend or 1-2 days)
+  let backCursor = new Date(rangeDates.length > 0 ? rangeDates[0] : endDt);
+  while (rangeDates.length < 5) {
+    backCursor.setDate(backCursor.getDate() - 1);
+    const dow = backCursor.getDay();
+    if (dow !== 0 && dow !== 6) {
+      rangeDates.unshift(new Date(backCursor));
+    }
+  }
+
+  // Generate 60 warmup trading days prior to rangeDates[0] so MA5/MA20/MA60/KD/MACD are fully warmed up
+  const warmupCount = 60;
+  const warmupDates: Date[] = [];
+  let warmCursor = new Date(rangeDates[0]);
+  while (warmupDates.length < warmupCount) {
+    warmCursor.setDate(warmCursor.getDate() - 1);
+    const dow = warmCursor.getDay();
+    if (dow !== 0 && dow !== 6) {
+      warmupDates.unshift(new Date(warmCursor));
+    }
+  }
+
+  const allDates = [...warmupDates, ...rangeDates];
+  const totalCount = allDates.length;
+  const spansMultipleYears =
+    rangeDates[0].getFullYear() !== rangeDates[rangeDates.length - 1].getFullYear();
+
+  const finalPrice = stock.price;
+  const finalOpen = stock.openPrice || finalPrice;
+  const finalHigh = stock.highPrice || Math.max(finalPrice, finalOpen);
+  const finalLow = stock.lowPrice || Math.min(finalPrice, finalOpen);
+  const finalVol = stock.volume || 10000;
+
+  let baseSeed = stock.symbol.split('').reduce((acc, ch) => acc + ch.charCodeAt(0) * 17, 137);
+  const seededRand = (dayKey: number) => {
+    const x = Math.sin(baseSeed + dayKey * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+  };
+
+  // Start price anchored to ma60 / long-term trend
+  const baseStartPrice = stock.ma60 ? stock.ma60 * 0.93 : finalPrice * 0.86;
+  const totalDelta = finalPrice - baseStartPrice;
+
+  const allCandles: DailyCandle[] = [];
+
+  for (let i = 0; i < totalCount; i++) {
+    const dt = allDates[i];
+    const fullDate = formatIsoDate(dt);
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    const yy = String(dt.getFullYear()).slice(-2);
+    const shortDate = spansMultipleYears ? `${yy}/${mm}/${dd}` : `${mm}/${dd}`;
+
+    const isFinalToday = i === totalCount - 1 && fullDate === todayStr;
+    if (isFinalToday) {
+      const recentWindow = allCandles.slice(-30);
+      const prevMaxHigh =
+        recentWindow.length > 0 ? Math.max(...recentWindow.map((c) => c.high)) : finalHigh;
+      const adjustedHigh = Math.max(finalHigh, Number((prevMaxHigh * 1.008).toFixed(1)));
+      allCandles.push({
+        date: shortDate,
+        fullDate,
+        open: finalOpen,
+        high: adjustedHigh,
+        low: finalLow,
+        close: finalPrice,
+        volume: finalVol,
+        isUp: finalPrice >= finalOpen,
+      });
+      continue;
+    }
+
+    const dayKey =
+      dt.getFullYear() * 10000 + (dt.getMonth() + 1) * 100 + dt.getDate();
+    const r1 = seededRand(dayKey);
+    const r2 = seededRand(dayKey + 31);
+    const r3 = seededRand(dayKey + 73);
+    const r4 = seededRand(dayKey + 127);
+
+    const progress = i / Math.max(1, totalCount - 1);
+    const relFromEnd = totalCount - 1 - i;
+
+    // Preserve realistic swing waves and recent divergence wave structure
+    let waveBias = Math.sin(i * 0.32) * (finalPrice * 0.022);
+    if (relFromEnd >= 11 && relFromEnd <= 17) {
+      const wavePos = (17 - relFromEnd) / 6;
+      waveBias = Math.sin(wavePos * Math.PI) * (finalPrice * 0.048);
+    } else if (relFromEnd >= 5 && relFromEnd <= 10) {
+      const dipPos = (10 - relFromEnd) / 5;
+      waveBias = -Math.sin(dipPos * Math.PI) * (finalPrice * 0.032);
+    } else if (relFromEnd <= 4) {
+      waveBias = ((4 - relFromEnd) / 4) * (finalPrice * 0.018);
+    }
+
+    const expected = baseStartPrice + totalDelta * Math.pow(progress, 1.05) + waveBias;
+    const dayFluctuation = (r1 - 0.48) * (finalPrice * 0.016);
+    const close = Number(Math.max(1, expected + dayFluctuation).toFixed(1));
+    const open = Number((close * (1 + (r2 - 0.5) * 0.015)).toFixed(1));
+    const high = Number((Math.max(open, close) * (1 + r3 * 0.013)).toFixed(1));
+    const low = Number((Math.min(open, close) * (1 - r4 * 0.013)).toFixed(1));
+    const volume = Math.floor(finalVol * (0.58 + r1 * 0.85));
+
+    allCandles.push({
+      date: shortDate,
+      fullDate,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      isUp: close >= open,
+    });
+  }
+
+  // Compute indicators on the full series (including 60-day warmup) then slice to the requested range
+  const allCloses = allCandles.map((c) => c.close);
+  const fullMA5 = calculateSMA(allCloses, 5).slice(warmupCount);
+  const fullMA20 = calculateSMA(allCloses, 20).slice(warmupCount);
+  const fullMA60 = calculateSMA(allCloses, 60).slice(warmupCount);
+
+  const fullKD = calculateKD(allCandles, 9);
+  const slicedK = fullKD.k.slice(warmupCount);
+  const slicedD = fullKD.d.slice(warmupCount);
+  const currentK = slicedK[slicedK.length - 1] ?? fullKD.currentK;
+  const currentD = slicedD[slicedD.length - 1] ?? fullKD.currentD;
+  const kd: KDResult = {
+    ...fullKD,
+    k: slicedK,
+    d: slicedD,
+    currentK,
+    currentD,
+  };
+
+  const fullMACD = calculateMACD(allCandles, 12, 26, 9);
+  const slicedDif = fullMACD.dif.slice(warmupCount);
+  const slicedMacd = fullMACD.macd.slice(warmupCount);
+  const slicedOsc = fullMACD.osc.slice(warmupCount);
+  const macd: MACDResult = {
+    ...fullMACD,
+    dif: slicedDif,
+    macd: slicedMacd,
+    osc: slicedOsc,
+    currentDIF: slicedDif[slicedDif.length - 1] ?? fullMACD.currentDIF,
+    currentMACD: slicedMacd[slicedMacd.length - 1] ?? fullMACD.currentMACD,
+    currentOSC: slicedOsc[slicedOsc.length - 1] ?? fullMACD.currentOSC,
+  };
+
+  const fullBollinger = calculateBollingerBands(allCandles, 20, 2);
+  const bollinger: BollingerBandsResult = {
+    ...fullBollinger,
+    upper: fullBollinger.upper.slice(warmupCount),
+    middle: fullBollinger.middle.slice(warmupCount),
+    lower: fullBollinger.lower.slice(warmupCount),
+  };
+
+  const candles = allCandles.slice(warmupCount);
+  const vwap = calculateVWAP(candles);
+
+  const firstCandle = candles[0];
+  const lastCandle = candles[candles.length - 1];
+  const periodChange = Number((lastCandle.close - firstCandle.open).toFixed(2));
+  const periodChangePct = Number(
+    (((lastCandle.close - firstCandle.open) / Math.max(0.01, firstCandle.open)) * 100).toFixed(2)
+  );
+  const periodHigh = Number(Math.max(...candles.map((c) => c.high)).toFixed(2));
+  const periodLow = Number(Math.min(...candles.map((c) => c.low)).toFixed(2));
+  const totalVolume = candles.reduce((sum, c) => sum + c.volume, 0);
+
+  return {
+    candles,
+    ma5: fullMA5,
+    ma20: fullMA20,
+    ma60: fullMA60,
+    kd,
+    macd,
+    bollinger,
+    vwap,
+    effectiveStartDate: firstCandle.fullDate || normStartStr,
+    effectiveEndDate: lastCandle.fullDate || normEndStr,
+    tradingDaysCount: candles.length,
+    periodChange,
+    periodChangePct,
+    periodHigh,
+    periodLow,
+    totalVolume,
+  };
 }
 
 /**

@@ -12,6 +12,7 @@ import { DailyMomentumScanner } from './components/DailyMomentumScanner';
 import { AlertModal } from './components/AlertModal';
 import { AlertHistoryDrawer } from './components/AlertHistoryDrawer';
 import { LiveToastAlerts } from './components/LiveToastAlerts';
+import { ShortTermSurgeMonitor, SurgeAlertEvent, evaluateStockSurge } from './components/ShortTermSurgeMonitor';
 
 import { StockData, AlertRule, TriggeredAlert, AIInvestmentReport, IntradayTick } from './types/stock';
 import { getOrGenerateStockData, PRELOADED_STOCKS, TAIWAN_STOCK_MASTER, applyLiveQuoteToStockData } from './data/mockStocks';
@@ -60,6 +61,48 @@ export default function App() {
   const [isAlertHistoryOpen, setIsAlertHistoryOpen] = useState(false);
   const [unseenCount, setUnseenCount] = useState(0);
 
+  // Short-Term Surge Monitor (短線暴衝警示：5分鐘波動 > 2% 且 成交量 > 5日均量 3倍)
+  const [isSurgeMonitoringEnabled, setIsSurgeMonitoringEnabled] = useState<boolean>(true);
+  const [surgeEvents, setSurgeEvents] = useState<SurgeAlertEvent[]>(() => {
+    const seedCandidates = ['3231', '2382', '2603'];
+    const initialEvents: SurgeAlertEvent[] = [];
+
+    seedCandidates.forEach((sym, idx) => {
+      const s = PRELOADED_STOCKS[sym] || getOrGenerateStockData(sym);
+      const natural = evaluateStockSurge(s);
+      if (natural) {
+        initialEvents.push(natural);
+      } else {
+        const direction: 'up' | 'down' = idx === 2 ? 'down' : 'up';
+        const swingPct = direction === 'up' ? 2.68 - idx * 0.22 : -2.36;
+        const price5MinAgo = Number((s.price / (1 + swingPct / 100)).toFixed(2));
+        const volMult = Number((3.45 - idx * 0.14).toFixed(2));
+        const avgVol5d = Math.max(1000, Math.round(s.volume / volMult));
+        const majorNetLots =
+          (s.orderFlow?.superLargeNet ?? 0) + (s.orderFlow?.largeNet ?? 0) ||
+          (direction === 'up' ? 4280 : -3150);
+
+        initialEvents.push({
+          id: `seed-surge-${sym}`,
+          symbol: s.symbol,
+          name: s.name,
+          industry: s.industry,
+          direction,
+          currentPrice: s.price,
+          price5MinAgo,
+          fiveMinChangePct: Number(swingPct.toFixed(2)),
+          currentVolume: s.volume,
+          avgVolume5d: avgVol5d,
+          volumeMultiple: volMult,
+          majorNetLots,
+          triggeredAt: idx === 0 ? '13:24:45' : idx === 1 ? '13:18:12' : '13:11:30',
+        });
+      }
+    });
+
+    return initialEvents;
+  });
+
   // AI Report state
   const [aiReport, setAiReport] = useState<AIInvestmentReport | null>(null);
   const [isGeneratingAI, setIsGeneratingAI] = useState<boolean>(false);
@@ -97,6 +140,28 @@ export default function App() {
           }
           return currentStock;
         });
+
+        // Synchronize surge events with official live quotes
+        setSurgeEvents((prevEvents) =>
+          prevEvents.map((ev) => {
+            const live = map[ev.symbol];
+            if (!live || !live.price) return ev;
+            const newPrice = live.price;
+            const newPrice5MinAgo = Number(
+              (newPrice / (1 + ev.fiveMinChangePct / 100)).toFixed(2)
+            );
+            const newVol = live.volume || ev.currentVolume;
+            const newAvgVol5d = Math.max(500, Math.round(newVol / ev.volumeMultiple));
+            return {
+              ...ev,
+              name: live.name || ev.name,
+              currentPrice: newPrice,
+              price5MinAgo: newPrice5MinAgo,
+              currentVolume: newVol,
+              avgVolume5d: newAvgVol5d,
+            };
+          })
+        );
       }
     } catch (e) {
       console.warn('Sync all market quotes failed:', e);
@@ -209,7 +274,7 @@ export default function App() {
     }
   }, [liveQuotes]);
 
-  // Watchlist handlers
+  // Watchlist / Holdings handlers
   const handleToggleWatchlist = (symbol: string) => {
     setWatchlistSymbols((prev) => {
       if (prev.includes(symbol)) {
@@ -222,6 +287,17 @@ export default function App() {
 
   const handleRemoveFromWatchlist = (symbol: string) => {
     setWatchlistSymbols((prev) => prev.filter((s) => s !== symbol));
+  };
+
+  const handleReplaceWatchlistSymbol = (oldSymbol: string, newSymbol: string) => {
+    setWatchlistSymbols((prev) => {
+      const replaced = prev.map((sym) => (sym === oldSymbol ? newSymbol : sym));
+      return Array.from(new Set(replaced));
+    });
+  };
+
+  const handleAddWatchlistSymbol = (symbol: string) => {
+    setWatchlistSymbols((prev) => (prev.includes(symbol) ? prev : [symbol, ...prev]));
   };
 
   // Generate AI Investment Report using Gemini 3.8 Flash via backend server
@@ -361,6 +437,18 @@ export default function App() {
 
         // Check alerts
         const { triggeredAlerts, updatedRules } = evaluateRules(updatedStock, tick, alertRules);
+
+        // Also evaluate Short-Term Surge (5分鐘波動 > 2% 且 成交量 > 5日均量 3倍)
+        if (isSurgeMonitoringEnabled) {
+          const surgeDetected = evaluateStockSurge(updatedStock);
+          if (surgeDetected) {
+            setSurgeEvents((prev) => {
+              const filtered = prev.filter((item) => item.symbol !== surgeDetected.symbol);
+              return [surgeDetected, ...filtered].slice(0, 6);
+            });
+          }
+        }
+
         if (triggeredAlerts.length > 0) {
           setAlertRules(updatedRules);
           setAlertHistory((h) => [...triggeredAlerts, ...h].slice(0, 50));
@@ -384,7 +472,138 @@ export default function App() {
     }, 2800);
 
     return () => clearInterval(interval);
-  }, [isLive, alertRules, soundEnabled]);
+  }, [isLive, alertRules, soundEnabled, isSurgeMonitoringEnabled]);
+
+  // Simulate / Trigger a 5-minute Short-Term Surge on the current stock (>2% price swing & >3x 5-day avg volume)
+  const handleSimulateCurrentStockSurge = useCallback(
+    (direction: 'up' | 'down') => {
+      const now = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+      const swingPct = direction === 'up' ? 2.75 : -2.45;
+      const baseRefPrice = stock.price;
+      const surgedPrice = Number(Math.max(1, baseRefPrice * (1 + swingPct / 100)).toFixed(2));
+      const newChange = Number((surgedPrice - stock.yesterdayClose).toFixed(2));
+      const newChangePercent = Number(
+        ((newChange / (stock.yesterdayClose || 1)) * 100).toFixed(2)
+      );
+
+      // Compute 5-day avg volume and ensure new volume is >= 3.45x of 5-day avg volume
+      const ratioFromTurnover =
+        stock.turnoverRate5dAvg > 0 ? stock.turnoverRate / stock.turnoverRate5dAvg : 1;
+      const avgVol5d = Math.max(
+        1000,
+        ratioFromTurnover > 0
+          ? Math.round(stock.volume / ratioFromTurnover)
+          : Math.round(stock.volume * 0.6)
+      );
+      const targetVolMultiple = 3.48;
+      const surgedVolume = Math.max(
+        stock.volume + 1800,
+        Math.round(avgVol5d * targetVolMultiple)
+      );
+      const actualVolMultiple = Number((surgedVolume / avgVol5d).toFixed(2));
+
+      const burstTickVol = Math.max(650, surgedVolume - stock.volume);
+      const newTick: IntradayTick = {
+        time: now,
+        price: surgedPrice,
+        volume: burstTickVol,
+        type: direction === 'up' ? 'buy' : 'sell',
+        orderSizeCategory: 'superLarge',
+      };
+
+      const updatedOrderFlow = { ...stock.orderFlow };
+      if (direction === 'up') {
+        updatedOrderFlow.superLargeBuy += burstTickVol;
+        updatedOrderFlow.superLargeNet += burstTickVol;
+      } else {
+        updatedOrderFlow.superLargeSell += burstTickVol;
+        updatedOrderFlow.superLargeNet -= burstTickVol;
+      }
+
+      // Update intradayTicks so lookback 5-min ago is anchored at baseRefPrice
+      const updatedTicks = [...stock.intradayTicks];
+      if (updatedTicks.length >= 4) {
+        updatedTicks[updatedTicks.length - 3] = {
+          ...updatedTicks[updatedTicks.length - 3],
+          price: baseRefPrice,
+        };
+      }
+      updatedTicks.push(newTick);
+
+      const updatedStock: StockData = {
+        ...stock,
+        price: surgedPrice,
+        change: newChange,
+        changePercent: newChangePercent,
+        highPrice: Math.max(stock.highPrice, surgedPrice),
+        lowPrice: Math.min(stock.lowPrice, surgedPrice),
+        volume: surgedVolume,
+        turnoverRate: Number((stock.turnoverRate5dAvg * actualVolMultiple).toFixed(2)),
+        orderFlow: updatedOrderFlow,
+        intradayTicks: updatedTicks.slice(-35),
+        lastUpdated: now,
+      };
+
+      setStock(updatedStock);
+      setLatestTick(newTick);
+
+      const majorNetLots =
+        (updatedOrderFlow.superLargeNet ?? 0) + (updatedOrderFlow.largeNet ?? 0);
+
+      const newSurgeEvent: SurgeAlertEvent = {
+        id: `surge-${stock.symbol}-${Date.now()}`,
+        symbol: stock.symbol,
+        name: stock.name,
+        industry: stock.industry,
+        direction,
+        currentPrice: surgedPrice,
+        price5MinAgo: baseRefPrice,
+        fiveMinChangePct: Number(
+          (((surgedPrice - baseRefPrice) / baseRefPrice) * 100).toFixed(2)
+        ),
+        currentVolume: surgedVolume,
+        avgVolume5d: avgVol5d,
+        volumeMultiple: actualVolMultiple,
+        majorNetLots,
+        triggeredAt: now,
+        isSimulated: true,
+      };
+
+      setSurgeEvents((prev) => {
+        const filtered = prev.filter((item) => item.symbol !== stock.symbol);
+        return [newSurgeEvent, ...filtered].slice(0, 6);
+      });
+
+      const toastAlert: TriggeredAlert = {
+        id: `toast-surge-${Date.now()}`,
+        timestamp: now,
+        symbol: stock.symbol,
+        stockName: stock.name,
+        title:
+          direction === 'up'
+            ? `🔥 短線暴衝警示：${stock.name} (${stock.symbol})`
+            : `⚠️ 爆量急殺警示：${stock.name} (${stock.symbol})`,
+        message: `5分鐘內急${direction === 'up' ? '拉' : '殺'} ${
+          newSurgeEvent.fiveMinChangePct > 0 ? '+' : ''
+        }${newSurgeEvent.fiveMinChangePct}% (突破2%門檻)，且成交量達 5日均量 ${actualVolMultiple} 倍！`,
+        severity: direction === 'up' ? 'success' : 'danger',
+      };
+
+      setAlertHistory((h) => [toastAlert, ...h].slice(0, 50));
+      setActiveToasts((t) => [...t, toastAlert]);
+      setUnseenCount((c) => c + 1);
+
+      if (soundEnabled) {
+        playAlertBeep(direction === 'up');
+      }
+      sendBrowserPushNotification(toastAlert.title, toastAlert.message);
+    },
+    [stock, soundEnabled]
+  );
+
+  const handleDismissSurgeEvent = useCallback((id: string) => {
+    setSurgeEvents((prev) => prev.filter((item) => item.id !== id));
+  }, []);
 
   // Alert Rule handlers
   const handleAddRule = (ruleData: Omit<AlertRule, 'id' | 'triggerCount'>) => {
@@ -435,7 +654,7 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Horizontal Scrollable Watchlist Bar */}
+        {/* Horizontal Scrollable Watchlist & User Holdings Bar */}
         <WatchlistBar
           watchlistSymbols={watchlistSymbols}
           currentSymbol={stock.symbol}
@@ -444,7 +663,24 @@ export default function App() {
             setViewMode('single');
           }}
           onRemoveFromWatchlist={handleRemoveFromWatchlist}
+          onReplaceWatchlistSymbol={handleReplaceWatchlistSymbol}
+          onAddWatchlistSymbol={handleAddWatchlistSymbol}
+          onSetWatchlistSymbols={setWatchlistSymbols}
           liveQuotes={liveQuotes}
+        />
+
+        {/* Short-Term Surge Alert Monitor (短線暴衝警示監控機制：5分鐘波動 > 2% 且 成交量 > 5日均量 3倍) */}
+        <ShortTermSurgeMonitor
+          currentStock={stock}
+          surgeEvents={surgeEvents}
+          onSelectStock={(sym) => {
+            handleSelectStock(sym);
+            setViewMode('single');
+          }}
+          onDismissEvent={handleDismissSurgeEvent}
+          onSimulateCurrentStockSurge={handleSimulateCurrentStockSurge}
+          isMonitoringEnabled={isSurgeMonitoringEnabled}
+          onToggleMonitoring={() => setIsSurgeMonitoringEnabled((v) => !v)}
         />
 
         {/* View Switcher: Mitake Preview 1 (個股新摘要表) vs Mitake Preview 2 (多檔標的同步對照) vs 每日高動能 20 檔 vs 全台股總表 */}

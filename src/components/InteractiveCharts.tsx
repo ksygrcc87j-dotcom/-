@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import * as d3 from 'd3';
 import { 
   TrendingUp, 
   BarChart2, 
@@ -13,11 +14,20 @@ import {
   Calendar,
   Scale,
   AlertTriangle,
-  TrendingDown
+  TrendingDown,
+  Crosshair,
+  ShieldCheck,
+  ArrowUpRight,
+  ArrowDownRight,
+  Search,
+  RotateCcw
 } from 'lucide-react';
 import { StockData, IntradayTick } from '../types/stock';
 import { 
   generateDailyCandles, 
+  generateDailyKLineByDateRange,
+  getDefaultKlineDateRange,
+  formatIsoDate,
   calculateSMA, 
   calculateKD, 
   calculateIntradayKD, 
@@ -29,6 +39,7 @@ import {
   calculateIntradayVWAP,
   detectTechnicalDivergence,
   DailyCandle,
+  DateRangeKLinePackage,
   KDResult,
   MACDResult,
   BollingerBandsResult,
@@ -42,7 +53,7 @@ interface InteractiveChartsProps {
 }
 
 export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, latestTick }) => {
-  const [activeTab, setActiveTab] = useState<'intraday' | 'orderFlow' | 'institutional' | 'peBand' | 'orderBook'>('intraday');
+  const [activeTab, setActiveTab] = useState<'intraday' | 'majorTrajectory' | 'orderFlow' | 'institutional' | 'peBand' | 'orderBook'>('intraday');
 
   // Technical Indicators Switcher State
   const [showMA5, setShowMA5] = useState<boolean>(true);
@@ -55,8 +66,63 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
   const [showDivergence, setShowDivergence] = useState<boolean>(true);
   const [chartMode, setChartMode] = useState<'intraday' | 'kline'>('intraday');
 
+  // Daily K-Line Custom Date Range State (可輸入日期區間後顯示日K技術圖)
+  const defaultKlineRange = useMemo(() => getDefaultKlineDateRange(35), []);
+  const [klineStartInput, setKlineStartInput] = useState<string>(defaultKlineRange.startDate);
+  const [klineEndInput, setKlineEndInput] = useState<string>(defaultKlineRange.endDate);
+  const [appliedKlineRange, setAppliedKlineRange] = useState<{
+    startDate: string;
+    endDate: string;
+  }>(defaultKlineRange);
+  const [activeKlinePreset, setActiveKlinePreset] = useState<
+    '2W' | '1M' | '35D' | '3M' | '6M' | 'YTD' | 'CUSTOM'
+  >('35D');
+
+  const handleApplyKlineDateRange = (
+    rawStart = klineStartInput,
+    rawEnd = klineEndInput,
+    preset: '2W' | '1M' | '35D' | '3M' | '6M' | 'YTD' | 'CUSTOM' = 'CUSTOM'
+  ) => {
+    const fallback = getDefaultKlineDateRange(35);
+    const s = rawStart || fallback.startDate;
+    const e = rawEnd || fallback.endDate;
+    const [normStart, normEnd] = s <= e ? [s, e] : [e, s];
+    setKlineStartInput(normStart);
+    setKlineEndInput(normEnd);
+    setAppliedKlineRange({ startDate: normStart, endDate: normEnd });
+    setActiveKlinePreset(preset);
+    setChartMode('kline');
+    setHoverIndex(null);
+  };
+
+  const handleSelectKlinePreset = (preset: '2W' | '1M' | '35D' | '3M' | '6M' | 'YTD') => {
+    if (preset === 'YTD') {
+      const now = new Date();
+      const startDate = `${now.getFullYear()}-01-01`;
+      const endDate = formatIsoDate(now);
+      handleApplyKlineDateRange(startDate, endDate, 'YTD');
+      return;
+    }
+    const daysMap: Record<'2W' | '1M' | '35D' | '3M' | '6M', number> = {
+      '2W': 10,
+      '1M': 22,
+      '35D': 35,
+      '3M': 65,
+      '6M': 130,
+    };
+    const range = getDefaultKlineDateRange(daysMap[preset]);
+    handleApplyKlineDateRange(range.startDate, range.endDate, preset);
+  };
+
   // Crosshair hover inspection
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  // Major Player Trajectory Perspective (主力軌跡透視) Interactive State
+  const [majorHoverIndex, setMajorHoverIndex] = useState<number | null>(null);
+  const [showMajorCost5d, setShowMajorCost5d] = useState<boolean>(true);
+  const [showSignalZones, setShowSignalZones] = useState<boolean>(true);
+  const [showSignalMarkers, setShowSignalMarkers] = useState<boolean>(true);
+  const [biasThreshold, setBiasThreshold] = useState<5 | 8>(5);
 
   const {
     price,
@@ -73,16 +139,25 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
     ma60,
   } = stock;
 
-  // 1. Daily Candles & Indicators (35-day historical dataset)
-  const dailyCandles = useMemo<DailyCandle[]>(() => generateDailyCandles(stock, 35), [stock]);
-  const dailyClosePrices = useMemo(() => dailyCandles.map((c) => c.close), [dailyCandles]);
-  const dailyMA5 = useMemo(() => calculateSMA(dailyClosePrices, 5), [dailyClosePrices]);
-  const dailyMA20 = useMemo(() => calculateSMA(dailyClosePrices, 20), [dailyClosePrices]);
-  const dailyMA60 = useMemo(() => calculateSMA(dailyClosePrices, 60), [dailyClosePrices]);
-  const dailyKD = useMemo<KDResult>(() => calculateKD(dailyCandles, 9), [dailyCandles]);
-  const dailyMACD = useMemo<MACDResult>(() => calculateMACD(dailyCandles, 12, 26, 9), [dailyCandles]);
-  const dailyBollinger = useMemo<BollingerBandsResult>(() => calculateBollingerBands(dailyCandles, 20, 2), [dailyCandles]);
-  const dailyVWAP = useMemo<VWAPResult>(() => calculateVWAP(dailyCandles), [dailyCandles]);
+  // 1. Daily Candles & Indicators (Driven by User-Specified Date Range [startDate, endDate])
+  const klinePackage = useMemo<DateRangeKLinePackage>(
+    () =>
+      generateDailyKLineByDateRange(
+        stock,
+        appliedKlineRange.startDate,
+        appliedKlineRange.endDate
+      ),
+    [stock, appliedKlineRange.startDate, appliedKlineRange.endDate]
+  );
+
+  const dailyCandles = klinePackage.candles;
+  const dailyMA5 = klinePackage.ma5;
+  const dailyMA20 = klinePackage.ma20;
+  const dailyMA60 = klinePackage.ma60;
+  const dailyKD = klinePackage.kd;
+  const dailyMACD = klinePackage.macd;
+  const dailyBollinger = klinePackage.bollinger;
+  const dailyVWAP = klinePackage.vwap;
 
   // 2. Intraday Ticks & Indicators
   const intradayPrices = useMemo(() => intradayTicks.map((t) => t.price), [intradayTicks]);
@@ -256,7 +331,7 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
       const curVWAP = dailyVWAP.values[idx] ?? dailyVWAP.currentVWAP;
 
       return {
-        label: candle.date,
+        label: candle.fullDate ? `${candle.fullDate} (${candle.date})` : candle.date,
         price: candle.close,
         open: candle.open,
         high: candle.high,
@@ -303,6 +378,298 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
     ma60,
   ]);
 
+  // --- 4. Major Player Cost Trajectory & Bias Ratio (主力軌跡透視 D3 數據與幾何計算) ---
+  const majorTrajectoryData = useMemo(() => {
+    const n = dailyCandles.length;
+    if (n === 0) return [];
+
+    // Raw 20-day rolling volume-weighted cost approximation
+    const rawCost20: number[] = [];
+    const rawCost5: number[] = [];
+
+    for (let i = 0; i < n; i++) {
+      const start20 = Math.max(0, i - 19);
+      let volSum20 = 0;
+      let pvSum20 = 0;
+      for (let j = start20; j <= i; j++) {
+        const c = dailyCandles[j];
+        const typical = (c.high + c.low + c.close * 2) / 4;
+        // Weight days with strong volume more heavily to reflect major player cost
+        const w = Math.pow(Math.max(100, c.volume), 1.12);
+        volSum20 += w;
+        pvSum20 += typical * w;
+      }
+      rawCost20.push(volSum20 > 0 ? pvSum20 / volSum20 : dailyCandles[i].close);
+
+      const start5 = Math.max(0, i - 4);
+      let volSum5 = 0;
+      let pvSum5 = 0;
+      for (let j = start5; j <= i; j++) {
+        const c = dailyCandles[j];
+        const typical = (c.high + c.low + c.close * 2) / 4;
+        const w = Math.pow(Math.max(100, c.volume), 1.15);
+        volSum5 += w;
+        pvSum5 += typical * w;
+      }
+      rawCost5.push(volSum5 > 0 ? pvSum5 / volSum5 : dailyCandles[i].close);
+    }
+
+    // Anchor the final day's 20D major cost line to stock.majorCost so all panels stay 100% consistent
+    const lastRaw20 = rawCost20[n - 1] || stock.majorCost || price;
+    const scaleRatio = (stock.majorCost || price) / lastRaw20;
+
+    return dailyCandles.map((c, idx) => {
+      const isLast = idx === n - 1;
+      const closePrice = isLast ? price : c.close;
+      const cost20 = Number((rawCost20[idx] * scaleRatio).toFixed(2));
+      const cost5 = Number((rawCost5[idx] * scaleRatio).toFixed(2));
+      const biasPct = Number((((closePrice - cost20) / (cost20 || 1)) * 100).toFixed(2));
+      const bias5dPct = Number((((closePrice - cost5) / (cost5 || 1)) * 100).toFixed(2));
+
+      // Estimate daily major net buy/sell lots (張)
+      const prevClose = idx > 0 ? dailyCandles[idx - 1].close : c.open;
+      const priceDeltaRatio = (closePrice - prevClose) / (prevClose || 1);
+      const baseNetLots = Math.round(
+        (c.volume * 0.22 * (priceDeltaRatio >= 0 ? 1 : -1) * (0.65 + Math.min(1.5, Math.abs(priceDeltaRatio) * 28))) +
+          (stock.majorAccumulation / 20) * 0.35
+      );
+
+      // Classify Signal Zone (主力進出訊號區間)
+      // 1. overheated: 高檔正乖離調節區 (乖離 >= +biasThreshold%)
+      // 2. breakout: 突破成本加碼區 (乖離 +1.5% ~ +biasThreshold% 且短線5日成本 >= 20日成本)
+      // 3. accumulation: 主力低檔吸籌區 (乖離 -biasThreshold% ~ +1.5% 且在成本線附近築底/吸籌)
+      // 4. defense: 跌破成本警戒區 (乖離 < -biasThreshold% 或重挫破線)
+      let zoneKey: 'accumulation' | 'breakout' | 'overheated' | 'defense' = 'accumulation';
+      let zoneLabel = '主力低檔吸籌區';
+      let zoneAction = '逢低分批佈局・沿成本線吸籌';
+
+      if (biasPct >= biasThreshold) {
+        zoneKey = 'overheated';
+        zoneLabel = '正乖離過熱調節區';
+        zoneAction = '高檔正乖離擴大・提防主力逢高調節';
+      } else if (biasPct <= -biasThreshold) {
+        zoneKey = 'defense';
+        zoneLabel = '負乖離超跌/破線區';
+        zoneAction = '跌破主力防守區・等待止穩訊號';
+      } else if (biasPct >= 1.2 && closePrice >= cost5) {
+        zoneKey = 'breakout';
+        zoneLabel = '突破成本拉抬加碼區';
+        zoneAction = '站穩主力成本線之上・多頭波段順勢加碼';
+      } else {
+        zoneKey = 'accumulation';
+        zoneLabel = '主力成本吸籌防守區';
+        zoneAction = '貼近主力均價成本・洗盤換手支撐強';
+      }
+
+      // Detect discrete entry/exit signal markers on key inflection days
+      let signalType: 'buy_entry' | 'breakout_add' | 'profit_trim' | 'cost_defend' | null = null;
+      let signalText = '';
+
+      if (idx >= 2) {
+        const prevCost20 = Number((rawCost20[idx - 1] * scaleRatio).toFixed(2));
+        const prevBias = ((dailyCandles[idx - 1].close - prevCost20) / (prevCost20 || 1)) * 100;
+
+        if (prevBias < 0 && biasPct >= 0.3 && baseNetLots > 0) {
+          signalType = 'breakout_add';
+          signalText = '突破成本加碼';
+        } else if (biasPct >= biasThreshold && prevBias < biasThreshold) {
+          signalType = 'profit_trim';
+          signalText = '正乖離調節';
+        } else if (biasPct <= -biasThreshold * 0.65 && baseNetLots > 0 && closePrice > c.open) {
+          signalType = 'buy_entry';
+          signalText = '主力低接吸籌';
+        } else if (Math.abs(biasPct) <= 0.85 && prevBias > 1.2 && closePrice >= cost20) {
+          signalType = 'cost_defend';
+          signalText = '回測成本有守';
+        }
+      }
+
+      return {
+        index: idx,
+        date: c.date,
+        close: closePrice,
+        high: c.high,
+        low: c.low,
+        volume: c.volume,
+        majorCost: cost20,
+        majorCost5d: cost5,
+        biasPct,
+        bias5dPct,
+        netMajorLots: baseNetLots,
+        zoneKey,
+        zoneLabel,
+        zoneAction,
+        signalType,
+        signalText,
+      };
+    });
+  }, [dailyCandles, stock.majorCost, stock.majorAccumulation, price, biasThreshold]);
+
+  // Group contiguous signal zones into horizontal span intervals for D3 background zone bands
+  const contiguousSignalZones = useMemo(() => {
+    if (majorTrajectoryData.length === 0) return [];
+    const spans: Array<{
+      startIdx: number;
+      endIdx: number;
+      zoneKey: 'accumulation' | 'breakout' | 'overheated' | 'defense';
+      zoneLabel: string;
+    }> = [];
+
+    let current = {
+      startIdx: 0,
+      endIdx: 0,
+      zoneKey: majorTrajectoryData[0].zoneKey,
+      zoneLabel: majorTrajectoryData[0].zoneLabel,
+    };
+
+    for (let i = 1; i < majorTrajectoryData.length; i++) {
+      const item = majorTrajectoryData[i];
+      if (item.zoneKey === current.zoneKey) {
+        current.endIdx = i;
+      } else {
+        spans.push(current);
+        current = {
+          startIdx: i,
+          endIdx: i,
+          zoneKey: item.zoneKey,
+          zoneLabel: item.zoneLabel,
+        };
+      }
+    }
+    spans.push(current);
+    return spans;
+  }, [majorTrajectoryData]);
+
+  // D3 Scales & Path Generators for Major Trajectory Perspective
+  const d3TrajectoryLayout = useMemo(() => {
+    const width = 800;
+    const priceHeight = 250;
+    const biasHeight = 145;
+    const pad = { top: 24, right: 48, bottom: 26, left: 58 };
+    const innerW = width - pad.left - pad.right;
+    const innerPriceH = priceHeight - pad.top - pad.bottom;
+    const innerBiasH = biasHeight - 20 - 24;
+
+    const count = Math.max(1, majorTrajectoryData.length);
+    const xScale = d3
+      .scaleLinear()
+      .domain([0, Math.max(1, count - 1)])
+      .range([pad.left, pad.left + innerW]);
+
+    const allPriceValues = majorTrajectoryData.flatMap((d) => [
+      d.close,
+      d.majorCost,
+      d.majorCost5d,
+      d.majorCost * (1 + biasThreshold / 100),
+      d.majorCost * (1 - biasThreshold / 100),
+    ]);
+    const [minP = price * 0.9, maxP = price * 1.1] = d3.extent(allPriceValues);
+    const pricePad = (maxP - minP || 1) * 0.08;
+
+    const yPriceScale = d3
+      .scaleLinear()
+      .domain([minP - pricePad, maxP + pricePad])
+      .range([pad.top + innerPriceH, pad.top]);
+
+    const maxAbsBias = Math.max(
+      biasThreshold * 1.45,
+      ...majorTrajectoryData.map((d) => Math.abs(d.biasPct) * 1.15),
+      6
+    );
+
+    const yBiasScale = d3
+      .scaleLinear()
+      .domain([-maxAbsBias, maxAbsBias])
+      .range([20 + innerBiasH, 20]);
+
+    // D3 Line Generators
+    const closeLineGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yPriceScale(d.close))
+      .curve(d3.curveMonotoneX);
+
+    const cost20LineGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yPriceScale(d.majorCost))
+      .curve(d3.curveMonotoneX);
+
+    const cost5LineGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yPriceScale(d.majorCost5d))
+      .curve(d3.curveMonotoneX);
+
+    // Upper & Lower Signal Band Paths (+biasThreshold% overheated band & -biasThreshold% accumulation band)
+    const upperThresholdBandGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yPriceScale(d.majorCost * (1 + biasThreshold / 100)))
+      .curve(d3.curveMonotoneX);
+
+    const lowerThresholdBandGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yPriceScale(d.majorCost * (1 - biasThreshold / 100)))
+      .curve(d3.curveMonotoneX);
+
+    // D3 Area between Price and Major Cost Line
+    const spreadAreaGen = d3
+      .area<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y0((d) => yPriceScale(d.majorCost))
+      .y1((d) => yPriceScale(d.close))
+      .curve(d3.curveMonotoneX);
+
+    // D3 Bias Ratio Curve & Area Generator
+    const biasLineGen = d3
+      .line<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y((d) => yBiasScale(d.biasPct))
+      .curve(d3.curveMonotoneX);
+
+    const biasAreaGen = d3
+      .area<(typeof majorTrajectoryData)[0]>()
+      .x((_, i) => xScale(i))
+      .y0(() => yBiasScale(0))
+      .y1((d) => yBiasScale(d.biasPct))
+      .curve(d3.curveMonotoneX);
+
+    return {
+      width,
+      priceHeight,
+      biasHeight,
+      pad,
+      innerW,
+      innerPriceH,
+      innerBiasH,
+      xScale,
+      yPriceScale,
+      yBiasScale,
+      maxAbsBias,
+      closePath: closeLineGen(majorTrajectoryData) || '',
+      cost20Path: cost20LineGen(majorTrajectoryData) || '',
+      cost5Path: cost5LineGen(majorTrajectoryData) || '',
+      upperBandPath: upperThresholdBandGen(majorTrajectoryData) || '',
+      lowerBandPath: lowerThresholdBandGen(majorTrajectoryData) || '',
+      spreadAreaPath: spreadAreaGen(majorTrajectoryData) || '',
+      biasLinePath: biasLineGen(majorTrajectoryData) || '',
+      biasAreaPath: biasAreaGen(majorTrajectoryData) || '',
+      priceTicks: yPriceScale.ticks(5),
+      biasTicks: [-biasThreshold, 0, biasThreshold],
+    };
+  }, [majorTrajectoryData, biasThreshold, price]);
+
+  const inspectedMajorPoint = useMemo(() => {
+    if (majorTrajectoryData.length === 0) return null;
+    const idx =
+      majorHoverIndex !== null && majorHoverIndex >= 0 && majorHoverIndex < majorTrajectoryData.length
+        ? majorHoverIndex
+        : majorTrajectoryData.length - 1;
+    return majorTrajectoryData[idx];
+  }, [majorTrajectoryData, majorHoverIndex]);
+
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
       {/* Primary Chart Nav Tabs */}
@@ -318,6 +685,18 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
           >
             <Activity className="w-3.5 h-3.5" />
             <span>技術走勢與指標 (MA/KD/MACD)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('majorTrajectory')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              activeTab === 'majorTrajectory'
+                ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                : 'text-amber-300/90 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30'
+            }`}
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            <span>主力軌跡透視</span>
           </button>
 
           <button
@@ -378,36 +757,86 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
       {/* TECHNICAL INDICATOR CONTROLS TOOLBAR (Only shown on technical chart tab) */}
       {activeTab === 'intraday' && (
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-2.5 bg-slate-950/80 border-b border-slate-800 text-xs">
-          {/* Chart Mode Toggle (分時 vs 日K) */}
-          <div className="flex items-center space-x-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800">
-            <button
-              onClick={() => {
-                setChartMode('intraday');
-                setHoverIndex(null);
-              }}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
-                chartMode === 'intraday'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Activity className="w-3 h-3" />
-              <span>分時走勢</span>
-            </button>
-            <button
-              onClick={() => {
-                setChartMode('kline');
-                setHoverIndex(null);
-              }}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
-                chartMode === 'kline'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <BarChart2 className="w-3 h-3" />
-              <span>日K技術線</span>
-            </button>
+          {/* Chart Mode Toggle (分時 vs 日K) + Inline Date Range Trigger */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center space-x-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setChartMode('intraday');
+                  setHoverIndex(null);
+                }}
+                className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
+                  chartMode === 'intraday'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Activity className="w-3 h-3" />
+                <span>分時走勢</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setChartMode('kline');
+                  setHoverIndex(null);
+                }}
+                className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
+                  chartMode === 'kline'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <BarChart2 className="w-3 h-3" />
+                <span>日K技術線 (區間查詢)</span>
+              </button>
+            </div>
+
+            {/* Quick Inline Date Range Picker & "顯示日K技術圖" Trigger */}
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/90 px-2.5 py-1 rounded-lg border border-slate-800">
+              <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="text-[11px] text-slate-300 font-semibold">日K區間：</span>
+              <input
+                type="date"
+                aria-label="日K起始日期"
+                value={klineStartInput}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setKlineStartInput(val);
+                  if (val && klineEndInput) {
+                    const [s, end] = val <= klineEndInput ? [val, klineEndInput] : [klineEndInput, val];
+                    setAppliedKlineRange({ startDate: s, endDate: end });
+                    setActiveKlinePreset('CUSTOM');
+                  }
+                }}
+                className="bg-slate-950 text-slate-200 font-mono text-[11px] px-2 py-0.5 rounded border border-slate-700 focus:border-blue-500 focus:outline-none"
+              />
+              <span className="text-slate-500 font-mono">~</span>
+              <input
+                type="date"
+                aria-label="日K結束日期"
+                value={klineEndInput}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setKlineEndInput(val);
+                  if (klineStartInput && val) {
+                    const [s, end] = klineStartInput <= val ? [klineStartInput, val] : [val, klineStartInput];
+                    setAppliedKlineRange({ startDate: s, endDate: end });
+                    setActiveKlinePreset('CUSTOM');
+                  }
+                }}
+                className="bg-slate-950 text-slate-200 font-mono text-[11px] px-2 py-0.5 rounded border border-slate-700 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => handleApplyKlineDateRange(klineStartInput, klineEndInput, 'CUSTOM')}
+                className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-sm transition-all cursor-pointer"
+                title="根據輸入的起始與結束日期，產生並顯示日K技術圖"
+              >
+                <Search className="w-3 h-3" />
+                <span>顯示日K技術圖</span>
+              </button>
+            </div>
           </div>
 
           {/* Indicator Selectors: MA (5, 20, 60) and KD */}
@@ -630,6 +1059,165 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
         {/* TAB 1: 技術走勢與指標 (MA/KD/MACD/Bollinger/VWAP) */}
         {activeTab === 'intraday' && (
           <div className="space-y-4">
+            {/* DAILY K-LINE DATE RANGE CONTROL & PERIOD SUMMARY PANEL (Visible in 日K技術線 mode) */}
+            {chartMode === 'kline' && (
+              <div className="bg-gradient-to-r from-slate-950 via-blue-950/25 to-slate-950 rounded-xl p-3.5 sm:p-4 border border-blue-500/30 shadow-md space-y-3">
+                <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+                  {/* Left: Date Range Inputs + Action Button */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center space-x-1.5 mr-1">
+                      <span className="p-1.5 rounded-lg bg-blue-500/20 border border-blue-500/40 text-blue-400">
+                        <Calendar className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-100 flex items-center space-x-1.5">
+                          <span>日K技術線・日期區間設定</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 font-mono">
+                            共 {klinePackage.tradingDaysCount} 個交易日
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400">
+                          輸入起始與結束日期後，點擊「顯示日K技術圖」即可繪製指定區間之日K線與技術指標
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-lg border border-slate-800">
+                      <label className="flex items-center space-x-1 text-[11px] text-slate-400 pl-1">
+                        <span>起始日:</span>
+                        <input
+                          type="date"
+                          value={klineStartInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setKlineStartInput(val);
+                            if (val && klineEndInput) {
+                              const [s, end] =
+                                val <= klineEndInput
+                                  ? [val, klineEndInput]
+                                  : [klineEndInput, val];
+                              setAppliedKlineRange({ startDate: s, endDate: end });
+                              setActiveKlinePreset('CUSTOM');
+                            }
+                          }}
+                          className="bg-slate-950 text-slate-100 font-mono text-xs px-2 py-1 rounded border border-slate-700 focus:border-blue-500 focus:outline-none"
+                        />
+                      </label>
+
+                      <span className="text-slate-500 font-bold px-0.5">至</span>
+
+                      <label className="flex items-center space-x-1 text-[11px] text-slate-400">
+                        <span>結束日:</span>
+                        <input
+                          type="date"
+                          value={klineEndInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setKlineEndInput(val);
+                            if (klineStartInput && val) {
+                              const [s, end] =
+                                klineStartInput <= val
+                                  ? [klineStartInput, val]
+                                  : [val, klineStartInput];
+                              setAppliedKlineRange({ startDate: s, endDate: end });
+                              setActiveKlinePreset('CUSTOM');
+                            }
+                          }}
+                          className="bg-slate-950 text-slate-100 font-mono text-xs px-2 py-1 rounded border border-slate-700 focus:border-blue-500 focus:outline-none"
+                        />
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleApplyKlineDateRange(klineStartInput, klineEndInput, 'CUSTOM')
+                        }
+                        className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-extrabold bg-blue-600 hover:bg-blue-500 text-white shadow-sm shadow-blue-500/20 transition-all cursor-pointer"
+                      >
+                        <Search className="w-3.5 h-3.5" />
+                        <span>顯示日K技術圖</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSelectKlinePreset('35D')}
+                        title="重置為預設近35個交易日區間"
+                        className="p-1.5 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700/70 transition-all cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Right: Quick Period Preset Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-400 font-semibold mr-1">
+                      快速區間：
+                    </span>
+                    {(
+                      [
+                        { id: '2W', label: '近2週 (10日)' },
+                        { id: '1M', label: '近1個月 (22日)' },
+                        { id: '35D', label: '近35日 (預設)' },
+                        { id: '3M', label: '近3個月 (季線)' },
+                        { id: '6M', label: '近半年 (130日)' },
+                        { id: 'YTD', label: '今年以來 (YTD)' },
+                      ] as const
+                    ).map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => handleSelectKlinePreset(preset.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                          activeKlinePreset === preset.id
+                            ? 'bg-blue-600 text-white border border-blue-400/60 shadow-sm'
+                            : 'bg-slate-900/90 text-slate-400 hover:text-slate-200 border border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Period Quantitative Summary Strip */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-slate-800/80 text-xs font-mono">
+                  <div className="bg-slate-900/75 px-3 py-1.5 rounded-lg border border-slate-800/90">
+                    <span className="text-[10px] text-slate-400 block font-sans">生效日期區間</span>
+                    <span className="text-slate-200 font-bold text-[11px]">
+                      {klinePackage.effectiveStartDate} ~ {klinePackage.effectiveEndDate}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/75 px-3 py-1.5 rounded-lg border border-slate-800/90">
+                    <span className="text-[10px] text-slate-400 block font-sans">區間累計漲跌</span>
+                    <span
+                      className={`font-extrabold ${
+                        klinePackage.periodChange >= 0 ? 'text-red-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {klinePackage.periodChange >= 0 ? '+' : ''}
+                      {klinePackage.periodChange} ({klinePackage.periodChangePct >= 0 ? '+' : ''}
+                      {klinePackage.periodChangePct}%)
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/75 px-3 py-1.5 rounded-lg border border-slate-800/90">
+                    <span className="text-[10px] text-slate-400 block font-sans">區間最高價</span>
+                    <span className="text-red-400 font-bold">${klinePackage.periodHigh}</span>
+                  </div>
+                  <div className="bg-slate-900/75 px-3 py-1.5 rounded-lg border border-slate-800/90">
+                    <span className="text-[10px] text-slate-400 block font-sans">區間最低價</span>
+                    <span className="text-emerald-400 font-bold">${klinePackage.periodLow}</span>
+                  </div>
+                  <div className="bg-slate-900/75 px-3 py-1.5 rounded-lg border border-slate-800/90 col-span-2 sm:col-span-1">
+                    <span className="text-[10px] text-slate-400 block font-sans">區間總成交量</span>
+                    <span className="text-amber-300 font-bold">
+                      {klinePackage.totalVolume.toLocaleString()} 張
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Live Inspection / Indicator HUD Header */}
             <div className="flex flex-wrap justify-between items-center text-xs text-slate-400 gap-2 bg-slate-950/60 px-3.5 py-2 rounded-xl border border-slate-800/80">
               <div className="flex flex-wrap items-center gap-3">
@@ -1164,13 +1752,16 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                   </g>
                 )}
 
-                {/* MODE B: 日K線走勢圖 */}
+                {/* MODE B: 日K線走勢圖 (依輸入日期區間動態繪製) */}
                 {chartMode === 'kline' && (
                   <g>
-                    {/* Render 35 Candlesticks */}
+                    {/* Render Candlesticks for Selected Date Range */}
                     {dailyCandles.map((c, idx) => {
                       const x = getKlineX(idx);
-                      const candleW = Math.max(4, (chartW / dailyCandles.length) * 0.6);
+                      const candleW = Math.max(
+                        2.2,
+                        Math.min(14, (chartW / Math.max(1, dailyCandles.length)) * 0.62)
+                      );
                       const col = c.isUp ? '#ef4444' : '#10b981';
                       const topY = getKlineY(Math.max(c.open, c.close));
                       const bottomY = getKlineY(Math.min(c.open, c.close));
@@ -1182,7 +1773,7 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                       const volY = padding.top + chartH - volH;
 
                       return (
-                        <g key={idx}>
+                        <g key={c.fullDate || idx}>
                           {/* Candlestick Wick */}
                           <line
                             x1={x}
@@ -1190,7 +1781,7 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                             x2={x}
                             y2={lowY}
                             stroke={col}
-                            strokeWidth="1.4"
+                            strokeWidth={dailyCandles.length > 90 ? '1' : '1.4'}
                           />
                           {/* Candlestick Body */}
                           <rect
@@ -1312,14 +1903,19 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                       />
                     )}
 
-                    {/* K-Line Date Axis Labels */}
-                    {dailyCandles
-                      .filter((_, i) => i % 6 === 0 || i === dailyCandles.length - 1)
-                      .map((c, i) => {
-                        const originalIndex = dailyCandles.indexOf(c);
-                        return (
+                    {/* Adaptive K-Line Date Axis Labels */}
+                    {(() => {
+                      const labelStep = Math.max(1, Math.ceil(dailyCandles.length / 7));
+                      return dailyCandles
+                        .map((c, originalIndex) => ({ c, originalIndex }))
+                        .filter(
+                          ({ originalIndex }) =>
+                            originalIndex % labelStep === 0 ||
+                            originalIndex === dailyCandles.length - 1
+                        )
+                        .map(({ c, originalIndex }) => (
                           <text
-                            key={i}
+                            key={c.fullDate || originalIndex}
                             x={getKlineX(originalIndex)}
                             y={mainSvgHeight - 6}
                             fill="#64748b"
@@ -1329,8 +1925,8 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                           >
                             {c.date}
                           </text>
-                        );
-                      })}
+                        ));
+                    })()}
                   </g>
                 )}
 
@@ -2184,6 +2780,665 @@ export const InteractiveCharts: React.FC<InteractiveChartsProps> = ({ stock, lat
                   ))}
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 6: 主力軌跡透視 (D3 Major Cost Line vs Price & Bias Ratio Visualization) */}
+        {activeTab === 'majorTrajectory' && inspectedMajorPoint && (
+          <div className="space-y-4">
+            {/* Top Control Bar & Summary Header */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-950/80 p-3.5 rounded-xl border border-slate-800">
+              <div className="space-y-1">
+                <div className="flex items-center space-x-2">
+                  <Crosshair className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs sm:text-sm font-bold text-white">
+                    D3 主力成本軌跡與乖離率透視圖 (35日動態籌碼推演)
+                  </span>
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                      inspectedMajorPoint.zoneKey === 'breakout'
+                        ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                        : inspectedMajorPoint.zoneKey === 'overheated'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : inspectedMajorPoint.zoneKey === 'accumulation'
+                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                        : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    }`}
+                  >
+                    當前區間：{inspectedMajorPoint.zoneLabel}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  以 D3.js 曲線擬合近 35 日「主力 20 日均價成本線」與「成交價」之動態乖離率，自動標示主力低接吸籌、突破加碼與高檔過熱調節區間。
+                </p>
+              </div>
+
+              {/* Layer & Threshold Controls */}
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <button
+                  onClick={() => setShowMajorCost5d(!showMajorCost5d)}
+                  className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg border font-bold transition-all ${
+                    showMajorCost5d
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                      : 'bg-slate-900 text-slate-500 border-slate-800'
+                  }`}
+                >
+                  <Check className="w-3 h-3" />
+                  <span>5日短線成本線</span>
+                </button>
+
+                <button
+                  onClick={() => setShowSignalZones(!showSignalZones)}
+                  className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg border font-bold transition-all ${
+                    showSignalZones
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-slate-900 text-slate-500 border-slate-800'
+                  }`}
+                >
+                  <Layers className="w-3 h-3" />
+                  <span>訊號區間底色帶</span>
+                </button>
+
+                <button
+                  onClick={() => setShowSignalMarkers(!showSignalMarkers)}
+                  className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg border font-bold transition-all ${
+                    showSignalMarkers
+                      ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                      : 'bg-slate-900 text-slate-500 border-slate-800'
+                  }`}
+                >
+                  <Zap className="w-3 h-3" />
+                  <span>進出訊號標記</span>
+                </button>
+
+                <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setBiasThreshold(5)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                      biasThreshold === 5 ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    ±5% 敏感閾值
+                  </button>
+                  <button
+                    onClick={() => setBiasThreshold(8)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                      biasThreshold === 8 ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    ±8% 波段閾值
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Real-time / Hover Inspected Data Readout Strip */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 bg-slate-950/90 p-3 rounded-xl border border-slate-800/90 text-xs font-mono">
+              <div className="bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800/70">
+                <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                  <span>檢視日期 / 現價</span>
+                  <span className="text-sky-400">{majorHoverIndex === null ? '最新即時' : '游標鎖定'}</span>
+                </div>
+                <div className="text-sm font-bold text-white mt-0.5">
+                  {inspectedMajorPoint.date} <span className="text-sky-400 ml-1">${inspectedMajorPoint.close.toFixed(1)}</span>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800/70">
+                <div className="text-[10px] text-slate-400">主力20日成本線</div>
+                <div className="text-sm font-bold text-amber-400 mt-0.5">
+                  ${inspectedMajorPoint.majorCost.toFixed(2)}
+                  <span className="text-[10px] text-purple-300 ml-1.5">
+                    (5日: ${inspectedMajorPoint.majorCost5d.toFixed(1)})
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800/70">
+                <div className="text-[10px] text-slate-400">主力成本乖離率</div>
+                <div
+                  className={`text-sm font-bold mt-0.5 flex items-center ${
+                    inspectedMajorPoint.biasPct >= 0 ? 'text-red-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {inspectedMajorPoint.biasPct >= 0 ? (
+                    <ArrowUpRight className="w-3.5 h-3.5 mr-0.5" />
+                  ) : (
+                    <ArrowDownRight className="w-3.5 h-3.5 mr-0.5" />
+                  )}
+                  {inspectedMajorPoint.biasPct >= 0 ? '+' : ''}
+                  {inspectedMajorPoint.biasPct.toFixed(2)}%
+                </div>
+              </div>
+
+              <div className="bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800/70">
+                <div className="text-[10px] text-slate-400">當日主力淨買賣推估</div>
+                <div
+                  className={`text-sm font-bold mt-0.5 ${
+                    inspectedMajorPoint.netMajorLots >= 0 ? 'text-red-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {inspectedMajorPoint.netMajorLots >= 0 ? '+' : ''}
+                  {inspectedMajorPoint.netMajorLots.toLocaleString()} 張
+                </div>
+              </div>
+
+              <div className="col-span-2 sm:col-span-1 bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800/70 font-sans">
+                <div className="text-[10px] text-slate-400">主力操作意圖判讀</div>
+                <div className="text-xs font-bold text-slate-200 mt-0.5 truncate" title={inspectedMajorPoint.zoneAction}>
+                  {inspectedMajorPoint.zoneAction}
+                </div>
+              </div>
+            </div>
+
+            {/* PANEL 1: D3 Price vs Major Cost Line & Signal Zones */}
+            <div className="bg-slate-950/90 rounded-xl border border-slate-800 p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] px-1">
+                <div className="flex items-center space-x-3">
+                  <span className="font-bold text-slate-200 flex items-center">
+                    <Scale className="w-3.5 h-3.5 text-amber-400 mr-1" />
+                    成交價 vs 主力成本線軌跡 (含主力進出訊號區間)
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-[10px]">
+                  <span className="flex items-center text-sky-300">
+                    <span className="w-3 h-0.5 bg-sky-400 mr-1" /> 成交價走勢
+                  </span>
+                  <span className="flex items-center text-amber-300">
+                    <span className="w-3 h-0.5 bg-amber-400 mr-1" /> 20日主力成本線
+                  </span>
+                  {showMajorCost5d && (
+                    <span className="flex items-center text-purple-300">
+                      <span className="w-3 h-0.5 border-b border-dashed border-purple-400 mr-1" /> 5日主力成本
+                    </span>
+                  )}
+                  <span className="flex items-center text-red-300">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-red-500/25 border border-red-500/50 mr-1" /> 突破加碼區
+                  </span>
+                  <span className="flex items-center text-sky-300">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-sky-500/20 border border-sky-500/40 mr-1" /> 低檔吸籌區
+                  </span>
+                  <span className="flex items-center text-amber-300">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-amber-500/20 border border-amber-500/40 mr-1" /> 正乖離調節區
+                  </span>
+                </div>
+              </div>
+
+              <div className="relative w-full overflow-hidden">
+                <svg
+                  viewBox={`0 0 ${d3TrajectoryLayout.width} ${d3TrajectoryLayout.priceHeight}`}
+                  className="w-full h-auto select-none cursor-crosshair"
+                  onMouseLeave={() => setMajorHoverIndex(null)}
+                >
+                  <defs>
+                    <linearGradient id="majorSpreadGain" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#ef4444" stopOpacity="0.28" />
+                      <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.05" />
+                    </linearGradient>
+                    <linearGradient id="biasPositiveGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#ef4444" stopOpacity="0.45" />
+                      <stop offset="100%" stopColor="#ef4444" stopOpacity="0.05" />
+                    </linearGradient>
+                  </defs>
+
+                  {/* Background Contiguous Signal Zone Regime Bands */}
+                  {showSignalZones &&
+                    contiguousSignalZones.map((span, idx) => {
+                      const x1 = d3TrajectoryLayout.xScale(Math.max(0, span.startIdx - 0.45));
+                      const x2 = d3TrajectoryLayout.xScale(
+                        Math.min(majorTrajectoryData.length - 1, span.endIdx + 0.45)
+                      );
+                      const w = Math.max(4, x2 - x1);
+                      const fillMap = {
+                        breakout: 'rgba(239, 68, 68, 0.09)',
+                        overheated: 'rgba(245, 158, 11, 0.12)',
+                        accumulation: 'rgba(56, 189, 248, 0.08)',
+                        defense: 'rgba(16, 185, 129, 0.09)',
+                      };
+                      const badgeColorMap = {
+                        breakout: '#fca5a5',
+                        overheated: '#fcd34d',
+                        accumulation: '#7dd3fc',
+                        defense: '#6ee7b7',
+                      };
+
+                      return (
+                        <g key={idx}>
+                          <rect
+                            x={x1}
+                            y={d3TrajectoryLayout.pad.top}
+                            width={w}
+                            height={d3TrajectoryLayout.innerPriceH}
+                            fill={fillMap[span.zoneKey]}
+                          />
+                          {w > 78 && (
+                            <text
+                              x={x1 + w / 2}
+                              y={d3TrajectoryLayout.pad.top + 12}
+                              textAnchor="middle"
+                              fill={badgeColorMap[span.zoneKey]}
+                              fontSize="9"
+                              fontWeight="bold"
+                              opacity="0.85"
+                            >
+                              {span.zoneLabel}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
+
+                  {/* Horizontal Price Grid Lines */}
+                  {d3TrajectoryLayout.priceTicks.map((tickVal, idx) => {
+                    const y = d3TrajectoryLayout.yPriceScale(tickVal);
+                    return (
+                      <g key={idx}>
+                        <line
+                          x1={d3TrajectoryLayout.pad.left}
+                          y1={y}
+                          x2={d3TrajectoryLayout.width - d3TrajectoryLayout.pad.right}
+                          y2={y}
+                          stroke="#1e293b"
+                          strokeDasharray="3,3"
+                        />
+                        <text
+                          x={d3TrajectoryLayout.pad.left - 8}
+                          y={y + 3}
+                          textAnchor="end"
+                          fill="#64748b"
+                          fontSize="10"
+                          fontFamily="monospace"
+                        >
+                          ${tickVal.toFixed(0)}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Overheated (+biasThreshold%) and Accumulation (-biasThreshold%) Dynamic Envelope Lines */}
+                  {showSignalZones && (
+                    <>
+                      <path
+                        d={d3TrajectoryLayout.upperBandPath}
+                        fill="none"
+                        stroke="#f59e0b"
+                        strokeWidth="1"
+                        strokeDasharray="4,4"
+                        opacity="0.55"
+                      />
+                      <path
+                        d={d3TrajectoryLayout.lowerBandPath}
+                        fill="none"
+                        stroke="#10b981"
+                        strokeWidth="1"
+                        strokeDasharray="4,4"
+                        opacity="0.55"
+                      />
+                    </>
+                  )}
+
+                  {/* Shaded Spread Area between Closing Price and 20D Major Cost Line */}
+                  <path d={d3TrajectoryLayout.spreadAreaPath} fill="url(#majorSpreadGain)" />
+
+                  {/* 5D Short-Term Major Cost Line */}
+                  {showMajorCost5d && (
+                    <path
+                      d={d3TrajectoryLayout.cost5Path}
+                      fill="none"
+                      stroke="#c084fc"
+                      strokeWidth="1.6"
+                      strokeDasharray="3,3"
+                      opacity="0.9"
+                    />
+                  )}
+
+                  {/* 20D Core Major Cost Line (主力成本線) */}
+                  <path
+                    d={d3TrajectoryLayout.cost20Path}
+                    fill="none"
+                    stroke="#f59e0b"
+                    strokeWidth="2.5"
+                  />
+
+                  {/* Closing / Current Price Line (當前成交價走勢) */}
+                  <path
+                    d={d3TrajectoryLayout.closePath}
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth="2.4"
+                  />
+
+                  {/* Discrete Entry / Exit Signal Markers on Key Inflection Days */}
+                  {showSignalMarkers &&
+                    majorTrajectoryData.map((d, i) => {
+                      if (!d.signalType) return null;
+                      const cx = d3TrajectoryLayout.xScale(i);
+                      const cy = d3TrajectoryLayout.yPriceScale(d.close);
+                      const isBullish =
+                        d.signalType === 'buy_entry' ||
+                        d.signalType === 'breakout_add' ||
+                        d.signalType === 'cost_defend';
+                      const markerColor =
+                        d.signalType === 'profit_trim'
+                          ? '#f59e0b'
+                          : d.signalType === 'breakout_add'
+                          ? '#ef4444'
+                          : '#38bdf8';
+
+                      return (
+                        <g key={`sig-${i}`}>
+                          <circle
+                            cx={cx}
+                            cy={cy}
+                            r="4.5"
+                            fill={markerColor}
+                            stroke="#0f172a"
+                            strokeWidth="1.5"
+                          />
+                          <g transform={`translate(${cx}, ${isBullish ? cy + 16 : cy - 12})`}>
+                            <rect
+                              x="-30"
+                              y="-8"
+                              width="60"
+                              height="14"
+                              rx="3"
+                              fill="#0f172a"
+                              stroke={markerColor}
+                              strokeWidth="0.9"
+                              opacity="0.92"
+                            />
+                            <text
+                              x="0"
+                              y="2"
+                              textAnchor="middle"
+                              fill={markerColor}
+                              fontSize="8.5"
+                              fontWeight="bold"
+                            >
+                              {d.signalText}
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    })}
+
+                  {/* X-axis Date Labels */}
+                  {majorTrajectoryData.map((d, i) => {
+                    if (i % 6 !== 0 && i !== majorTrajectoryData.length - 1) return null;
+                    const x = d3TrajectoryLayout.xScale(i);
+                    return (
+                      <text
+                        key={i}
+                        x={x}
+                        y={d3TrajectoryLayout.priceHeight - 6}
+                        textAnchor="middle"
+                        fill="#64748b"
+                        fontSize="10"
+                        fontFamily="monospace"
+                      >
+                        {d.date}
+                      </text>
+                    );
+                  })}
+
+                  {/* Active Crosshair on Upper Price vs Major Cost Chart */}
+                  {inspectedMajorPoint && (
+                    <g>
+                      <line
+                        x1={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        y1={d3TrajectoryLayout.pad.top}
+                        x2={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        y2={d3TrajectoryLayout.pad.top + d3TrajectoryLayout.innerPriceH}
+                        stroke="#f8fafc"
+                        strokeWidth="1.1"
+                        strokeDasharray="3,3"
+                        opacity="0.8"
+                      />
+                      <circle
+                        cx={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        cy={d3TrajectoryLayout.yPriceScale(inspectedMajorPoint.close)}
+                        r="4.5"
+                        fill="#38bdf8"
+                        stroke="#0f172a"
+                        strokeWidth="1.5"
+                      />
+                      <circle
+                        cx={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        cy={d3TrajectoryLayout.yPriceScale(inspectedMajorPoint.majorCost)}
+                        r="4.5"
+                        fill="#f59e0b"
+                        stroke="#0f172a"
+                        strokeWidth="1.5"
+                      />
+                    </g>
+                  )}
+
+                  {/* Interactive Hover Hit Columns */}
+                  {majorTrajectoryData.map((_, i) => {
+                    const colW = d3TrajectoryLayout.innerW / Math.max(1, majorTrajectoryData.length);
+                    const x = d3TrajectoryLayout.xScale(i) - colW / 2;
+                    return (
+                      <rect
+                        key={`hit-top-${i}`}
+                        x={x}
+                        y={d3TrajectoryLayout.pad.top}
+                        width={colW}
+                        height={d3TrajectoryLayout.innerPriceH}
+                        fill="transparent"
+                        onMouseEnter={() => setMajorHoverIndex(i)}
+                      />
+                    );
+                  })}
+                </svg>
+              </div>
+            </div>
+
+            {/* PANEL 2: D3 Bias Ratio % (主力成本乖離率走勢圖) */}
+            <div className="bg-slate-950/90 rounded-xl border border-slate-800 p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] px-1">
+                <span className="font-bold text-slate-200 flex items-center">
+                  <Activity className="w-3.5 h-3.5 text-red-400 mr-1" />
+                  主力成本乖離率走勢圖 (Bias Ratio = (成交價 - 主力成本) ÷ 主力成本)
+                </span>
+                <div className="flex items-center space-x-3 text-[10px] font-mono">
+                  <span className="text-amber-400">+{biasThreshold}% 正乖離過熱線</span>
+                  <span className="text-slate-400">0% 成本基準軸</span>
+                  <span className="text-emerald-400">-{biasThreshold}% 負乖離低接線</span>
+                </div>
+              </div>
+
+              <div className="relative w-full overflow-hidden">
+                <svg
+                  viewBox={`0 0 ${d3TrajectoryLayout.width} ${d3TrajectoryLayout.biasHeight}`}
+                  className="w-full h-auto select-none cursor-crosshair"
+                  onMouseLeave={() => setMajorHoverIndex(null)}
+                >
+                  {/* Reference Lines: +biasThreshold%, 0%, -biasThreshold% */}
+                  {d3TrajectoryLayout.biasTicks.map((val, idx) => {
+                    const y = d3TrajectoryLayout.yBiasScale(val);
+                    const isZero = val === 0;
+                    const strokeColor = isZero ? '#475569' : val > 0 ? '#f59e0b' : '#10b981';
+                    return (
+                      <g key={idx}>
+                        <line
+                          x1={d3TrajectoryLayout.pad.left}
+                          y1={y}
+                          x2={d3TrajectoryLayout.width - d3TrajectoryLayout.pad.right}
+                          y2={y}
+                          stroke={strokeColor}
+                          strokeWidth={isZero ? '1.3' : '1'}
+                          strokeDasharray={isZero ? undefined : '4,4'}
+                          opacity={isZero ? '0.9' : '0.65'}
+                        />
+                        <text
+                          x={d3TrajectoryLayout.pad.left - 8}
+                          y={y + 3}
+                          textAnchor="end"
+                          fill={strokeColor}
+                          fontSize="9.5"
+                          fontFamily="monospace"
+                        >
+                          {val > 0 ? `+${val}%` : `${val}%`}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Daily Bias Histogram Bars */}
+                  {majorTrajectoryData.map((d, i) => {
+                    const x = d3TrajectoryLayout.xScale(i);
+                    const zeroY = d3TrajectoryLayout.yBiasScale(0);
+                    const valY = d3TrajectoryLayout.yBiasScale(d.biasPct);
+                    const barW = Math.max(4, (d3TrajectoryLayout.innerW / majorTrajectoryData.length) * 0.52);
+                    const yTop = Math.min(zeroY, valY);
+                    const barH = Math.max(1.5, Math.abs(valY - zeroY));
+                    const fill =
+                      d.biasPct >= biasThreshold
+                        ? '#f59e0b'
+                        : d.biasPct >= 0
+                        ? '#ef4444'
+                        : d.biasPct <= -biasThreshold
+                        ? '#38bdf8'
+                        : '#10b981';
+
+                    return (
+                      <rect
+                        key={`bias-bar-${i}`}
+                        x={x - barW / 2}
+                        y={yTop}
+                        width={barW}
+                        height={barH}
+                        rx="1.5"
+                        fill={fill}
+                        opacity={inspectedMajorPoint.index === i ? '0.95' : '0.45'}
+                      />
+                    );
+                  })}
+
+                  {/* Smooth D3 Bias Curve */}
+                  <path
+                    d={d3TrajectoryLayout.biasAreaPath}
+                    fill="url(#biasPositiveGrad)"
+                    opacity="0.35"
+                  />
+                  <path
+                    d={d3TrajectoryLayout.biasLinePath}
+                    fill="none"
+                    stroke="#f8fafc"
+                    strokeWidth="1.8"
+                  />
+
+                  {/* Crosshair on Bias Chart */}
+                  {inspectedMajorPoint && (
+                    <g>
+                      <line
+                        x1={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        y1={20}
+                        x2={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        y2={20 + d3TrajectoryLayout.innerBiasH}
+                        stroke="#f8fafc"
+                        strokeWidth="1.1"
+                        strokeDasharray="3,3"
+                      />
+                      <circle
+                        cx={d3TrajectoryLayout.xScale(inspectedMajorPoint.index)}
+                        cy={d3TrajectoryLayout.yBiasScale(inspectedMajorPoint.biasPct)}
+                        r="4"
+                        fill={inspectedMajorPoint.biasPct >= 0 ? '#ef4444' : '#10b981'}
+                        stroke="#ffffff"
+                        strokeWidth="1.5"
+                      />
+                    </g>
+                  )}
+
+                  {/* Interactive Hover Hit Columns */}
+                  {majorTrajectoryData.map((_, i) => {
+                    const colW = d3TrajectoryLayout.innerW / Math.max(1, majorTrajectoryData.length);
+                    const x = d3TrajectoryLayout.xScale(i) - colW / 2;
+                    return (
+                      <rect
+                        key={`hit-bias-${i}`}
+                        x={x}
+                        y={20}
+                        width={colW}
+                        height={d3TrajectoryLayout.innerBiasH}
+                        fill="transparent"
+                        onMouseEnter={() => setMajorHoverIndex(i)}
+                      />
+                    );
+                  })}
+                </svg>
+              </div>
+            </div>
+
+            {/* Signal Zones Action Guide Matrix (主力進出訊號區間實戰對照表) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {[
+                {
+                  key: 'accumulation',
+                  title: '主力低檔吸籌區',
+                  rangeText: `$${(stock.majorCost * (1 - biasThreshold / 100)).toFixed(1)} ~ $${(
+                    stock.majorCost * 1.012
+                  ).toFixed(1)}`,
+                  biasRule: `乖離率 -${biasThreshold}% ~ +1.2%`,
+                  desc: '股價貼近主力 20 日均價成本線，大戶暗中吃貨護盤，下檔具備籌碼鐵板支撐。',
+                  color: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
+                },
+                {
+                  key: 'breakout',
+                  title: '突破成本加碼區',
+                  rangeText: `$${(stock.majorCost * 1.012).toFixed(1)} ~ $${(
+                    stock.majorCost *
+                    (1 + biasThreshold / 100)
+                  ).toFixed(1)}`,
+                  biasRule: `乖離率 +1.2% ~ +${biasThreshold}%`,
+                  desc: '現價帶量脫離主力成本區且 5 日成本向上發散，屬於主升段點火順勢加碼訊號。',
+                  color: 'border-red-500/40 bg-red-500/10 text-red-300',
+                },
+                {
+                  key: 'overheated',
+                  title: '正乖離過熱調節區',
+                  rangeText: `≥ $${(stock.majorCost * (1 + biasThreshold / 100)).toFixed(1)}`,
+                  biasRule: `乖離率 ≥ +${biasThreshold}%`,
+                  desc: '短線漲幅遠高於主力持倉成本，主力獲利豐厚易引發逢高分批調節與技術面修正。',
+                  color: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+                },
+                {
+                  key: 'defense',
+                  title: '跌破成本警戒區',
+                  rangeText: `≤ $${(stock.majorCost * (1 - biasThreshold / 100)).toFixed(1)}`,
+                  biasRule: `乖離率 ≤ -${biasThreshold}%`,
+                  desc: '股價跌破主力核心持倉成本防線，短線轉為套牢壓力或極度超跌，宜待止穩訊號。',
+                  color: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+                },
+              ].map((zone) => {
+                const latestPoint = majorTrajectoryData[majorTrajectoryData.length - 1];
+                const isCurrent = latestPoint?.zoneKey === zone.key;
+                return (
+                  <div
+                    key={zone.key}
+                    className={`p-3.5 rounded-xl border transition-all ${zone.color} ${
+                      isCurrent ? 'ring-2 ring-white/60 shadow-lg' : 'opacity-85'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-extrabold flex items-center">
+                        <ShieldCheck className="w-3.5 h-3.5 mr-1" />
+                        {zone.title}
+                      </span>
+                      {isCurrent && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-white text-slate-950 font-black">
+                          目前落點
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-mono text-xs font-bold text-white mb-0.5">{zone.rangeText}</div>
+                    <div className="text-[10px] font-mono opacity-80 mb-2">{zone.biasRule}</div>
+                    <p className="text-[11px] text-slate-300 leading-relaxed">{zone.desc}</p>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

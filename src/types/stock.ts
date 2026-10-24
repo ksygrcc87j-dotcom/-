@@ -201,3 +201,12 @@ export interface AIInvestmentReport {
   generatedBy?: string;
   isRealtimeGenerated?: boolean;
 }
+
+export interface UserHoldingItem {
+  symbol: string;
+  lots: number;         // 持有張數 (1張 = 1000股，支援零股如 0.5 張；0 代表純觀察)
+  avgCost: number;      // 平均持股成本 (元)
+  note?: string;        // 持股備註
+  updatedAt?: string;   // 最後儲存時間
+}
+
